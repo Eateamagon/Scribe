@@ -1,0 +1,8 @@
+Scribe.app/
+scribe.log
+*.p12
+*.pem
+.DS_Store
+editor-shot.png
+editor-erased.png
+*.png.tmp
