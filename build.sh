@@ -1,5 +1,5 @@
 #!/bin/bash
-# Builds Scribe.app from main.swift. Requires Xcode Command Line Tools.
+# Builds Scribe.app from the Swift sources listed in SOURCES below. Requires Xcode Command Line Tools.
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -107,6 +107,10 @@ else
   echo "!!     swift assets/make-icon.swift mark"
 fi
 
+# Every source file, explicitly — a *.swift glob would pick up stray scripts.
+# main.swift must stay named that: it holds the top-level entry code.
+SOURCES=(main.swift Core.swift Capture.swift Export.swift Editor.swift SelfTest.swift)
+
 swiftc -O \
   -framework Cocoa \
   -framework Carbon \
@@ -114,7 +118,7 @@ swiftc -O \
   -framework VideoToolbox \
   -framework ImageIO \
   -o "$APP/Contents/MacOS/$BIN" \
-  main.swift
+  "${SOURCES[@]}"
 
 # ── Signing ──────────────────────────────────────────────────────────────────
 #
