@@ -6,3 +6,4 @@ scribe.log
 editor-shot.png
 editor-erased.png
 *.png.tmp
+.testdata/
