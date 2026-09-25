@@ -378,6 +378,29 @@ enum Img {
         return CGImageSourceCreateImageAtIndex(src, 0, nil)
     }
 
+    /// Pixel dimensions from the file header, without decoding anything.
+    static func pixelSize(of url: URL) -> CGSize? {
+        guard let src = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any],
+              let w = props[kCGImagePropertyPixelWidth] as? Int,
+              let h = props[kCGImagePropertyPixelHeight] as? Int
+        else { return nil }
+        return CGSize(width: w, height: h)
+    }
+
+    /// Decodes straight to at most `longestEdge` pixels. For a GIF frame that
+    /// is about to be shrunk anyway this beats decode-then-downscale: JPEG can
+    /// decode at a fraction of its size, and the full-size bitmap never exists.
+    static func read(_ url: URL, longestEdge: CGFloat) -> CGImage? {
+        guard let src = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
+        return CGImageSourceCreateThumbnailAtIndex(src, 0, [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceThumbnailMaxPixelSize: max(Int(longestEdge.rounded()), 1),
+            kCGImageSourceCreateThumbnailWithTransform: false,
+            kCGImageSourceShouldCacheImmediately: true,
+        ] as CFDictionary)
+    }
+
     /// JPEG, for the email export only. A 10-step guide of PNG screenshots is
     /// 15 MB of base64 in the message body, which Gmail will not thank you for;
     /// the same guide as quality-0.8 JPEG is closer to 1 MB.
@@ -773,20 +796,20 @@ enum Annotator {
     /// Text gets a soft backing plate. A caption typed onto a screenshot lands
     /// on whatever colour happens to be there, and white-on-white is the
     /// default outcome without one.
+    ///
+    /// Core Text straight into the CGContext, not NSAttributedString through
+    /// an NSGraphicsContext: `NSGraphicsContext.current` is per-thread AppKit
+    /// state, and GIF frames are rendered off the main thread.
     private static func drawLabel(_ markup: Markup, at point: CGPoint,
                                   longest: CGFloat, in ctx: CGContext) {
         guard !markup.text.isEmpty else { return }
         let size = max(markup.fontSize * longest, 8)
-        let attributes: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: size, weight: .semibold),
-            .foregroundColor: markup.color.nsColor,
-        ]
-        let string = NSAttributedString(string: markup.text, attributes: attributes)
-        let measured = string.size()
+        let line = TextLine(markup.text, size: size, weight: TextLine.semibold,
+                            color: markup.color.cgColor)
         let pad = size * 0.28
-        let plate = CGRect(x: point.x - pad, y: point.y - measured.height - pad,
-                           width: measured.width + pad * 2,
-                           height: measured.height + pad * 2)
+        let plate = CGRect(x: point.x - pad, y: point.y - line.height - pad,
+                           width: line.width + pad * 2,
+                           height: line.height + pad * 2)
 
         let dark = markup.color == .white || markup.color == .yellow
         ctx.setFillColor(dark ? CGColor(red: 0.08, green: 0.09, blue: 0.11, alpha: 0.72)
@@ -795,17 +818,23 @@ enum Annotator {
                            transform: nil))
         ctx.fillPath()
 
-        let previous = NSGraphicsContext.current
-        NSGraphicsContext.current = NSGraphicsContext(cgContext: ctx, flipped: false)
-        string.draw(at: CGPoint(x: point.x, y: point.y - measured.height))
-        NSGraphicsContext.current = previous
+        // The line box's bottom edge sits `height` below the anchor, exactly
+        // where NSAttributedString.draw(at:) used to put it.
+        line.draw(in: ctx, baseline: CGPoint(x: point.x,
+                                             y: point.y - line.height + line.descent))
     }
 
     /// Draws the highlight and the step number onto a copy of the screenshot.
+    ///
+    /// `visible` is the part of the image that will survive a crop (0…1,
+    /// top-left; nil = all of it). The badge is kept inside it, and the stroke
+    /// and badge size follow *its* longest edge — measured against the whole
+    /// image, a tight crop shown at full width gets a giant badge.
     static func annotate(_ image: CGImage,
                          click: CGPoint,
                          target: CGRect?,
-                         number: Int) -> CGImage? {
+                         number: Int,
+                         visible: CGRect? = nil) -> CGImage? {
         let w = CGFloat(image.width), h = CGFloat(image.height)
         guard let ctx = CGContext(data: nil,
                                   width: image.width,
@@ -819,9 +848,14 @@ enum Annotator {
 
         ctx.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
 
-        // Stroke widths scale with the image so a 1800 px and a 900 px export
-        // look like the same drawing, not the same number of pixels.
-        let unit = max(w, h) / 450.0
+        let whole = CGRect(x: 0, y: 0, width: w, height: h)
+        var area = visible.map { Geo.drawRect($0, in: w, h).intersection(whole) } ?? whole
+        if area.isNull || area.width < 1 || area.height < 1 { area = whole }
+
+        // Stroke widths scale with what is shown, so an 1800 px and a 900 px
+        // export — or a whole screen and a crop of one dialog — look like the
+        // same drawing, not the same number of pixels.
+        let unit = max(area.width, area.height) / 450.0
         ctx.setLineJoin(.round)
 
         var badgeAnchor: CGPoint
@@ -857,23 +891,21 @@ enum Annotator {
             badgeAnchor = CGPoint(x: c.x - radius, y: c.y + radius)
         }
 
-        drawBadge(number, at: badgeAnchor, unit: unit, in: ctx, imageW: w, imageH: h)
+        drawBadge(number, at: badgeAnchor, unit: unit, in: ctx, inside: area)
         return ctx.makeImage()
     }
 
-    /// The numbered dot that sits on the corner of the highlight. Core Text via
-    /// NSAttributedString, drawn through an NSGraphicsContext wrapping the same
-    /// CGContext — cheaper to write than laying out a CTLine by hand.
+    /// The numbered dot that sits on the corner of the highlight, clamped
+    /// inside `area` so a crop never slices it in half.
     private static func drawBadge(_ number: Int,
                                   at anchor: CGPoint,
                                   unit: CGFloat,
                                   in ctx: CGContext,
-                                  imageW: CGFloat,
-                                  imageH: CGFloat) {
+                                  inside area: CGRect) {
         let d = unit * 11
         var origin = CGPoint(x: anchor.x - d * 0.45, y: anchor.y - d * 0.55)
-        origin.x = min(max(origin.x, unit), imageW - d - unit)
-        origin.y = min(max(origin.y, unit), imageH - d - unit)
+        origin.x = min(max(origin.x, area.minX + unit), area.maxX - d - unit)
+        origin.y = min(max(origin.y, area.minY + unit), area.maxY - d - unit)
         let circle = CGRect(x: origin.x, y: origin.y, width: d, height: d)
 
         ctx.setFillColor(halo)
@@ -881,22 +913,65 @@ enum Annotator {
         ctx.setFillColor(accent)
         ctx.fillEllipse(in: circle)
 
-        let prev = NSGraphicsContext.current
-        let gc = NSGraphicsContext(cgContext: ctx, flipped: false)
-        NSGraphicsContext.current = gc
-        let style = NSMutableParagraphStyle()
-        style.alignment = .center
-        let text = NSAttributedString(string: "\(number)", attributes: [
-            .font: NSFont.systemFont(ofSize: d * 0.58, weight: .bold),
-            .foregroundColor: NSColor.white,
-            .paragraphStyle: style,
-        ])
-        let size = text.size()
-        text.draw(in: CGRect(x: circle.minX,
-                             y: circle.midY - size.height / 2,
-                             width: circle.width,
-                             height: size.height))
-        NSGraphicsContext.current = prev
+        // Centred the way NSAttributedString.draw(in:) with a centred
+        // paragraph style put it: the line box's middle on the circle's.
+        let line = TextLine("\(number)", size: d * 0.58, weight: TextLine.bold,
+                            color: CGColor(red: 1, green: 1, blue: 1, alpha: 1))
+        line.draw(in: ctx, baseline: CGPoint(x: circle.midX - line.width / 2,
+                                             y: circle.midY + line.height / 2 - line.ascent))
+    }
+
+    /// One line of text laid out with Core Text. Thread-safe, unlike anything
+    /// that goes through `NSGraphicsContext.current` (per-thread AppKit state) —
+    /// which is what lets a GIF rendered on a background queue carry the same
+    /// labels and badges as the editor preview.
+    struct TextLine {
+        /// Core Text weight-trait values: the numbers behind NSFont.Weight
+        /// `.semibold` and `.bold`, written out so this never touches AppKit.
+        static let semibold: CGFloat = 0.3
+        static let bold: CGFloat = 0.4
+
+        let line: CTLine
+        let width: CGFloat
+        let ascent: CGFloat
+        let descent: CGFloat
+        let leading: CGFloat
+        /// The line box, as NSAttributedString.size() measured it.
+        var height: CGFloat { ascent + descent + leading }
+
+        init(_ text: String, size: CGFloat, weight: CGFloat, color: CGColor) {
+            let font = TextLine.systemFont(size: size, weight: weight)
+            let attributes = [kCTFontAttributeName: font,
+                              kCTForegroundColorAttributeName: color] as CFDictionary
+            let string = CFAttributedStringCreate(nil, text as CFString, attributes)!
+            line = CTLineCreateWithAttributedString(string)
+            var a: CGFloat = 0, d: CGFloat = 0, l: CGFloat = 0
+            width = CGFloat(CTLineGetTypographicBounds(line, &a, &d, &l))
+            // AppKit's line box rounds each metric to whole points; matching
+            // it keeps the glyphs on the same pixel rows they always were on,
+            // rather than half a pixel off and visibly softer.
+            ascent = a.rounded(); descent = d.rounded(); leading = l.rounded()
+        }
+
+        func draw(in ctx: CGContext, baseline: CGPoint) {
+            ctx.saveGState()
+            ctx.textMatrix = .identity
+            ctx.textPosition = baseline
+            CTLineDraw(line, ctx)
+            ctx.restoreGState()
+        }
+
+        /// The system UI font at a weight — the face
+        /// `NSFont.systemFont(ofSize:weight:)` returns, reached through Core Text.
+        static func systemFont(size: CGFloat, weight: CGFloat) -> CTFont {
+            let base = CTFontCreateUIFontForLanguage(.system, size, nil)
+                ?? CTFontCreateWithName("Helvetica" as CFString, size, nil)
+            let traits = [kCTFontWeightTrait: weight] as CFDictionary
+            let descriptor = CTFontDescriptorCreateCopyWithAttributes(
+                CTFontCopyFontDescriptor(base),
+                [kCTFontTraitsAttribute: traits] as CFDictionary)
+            return CTFontCreateWithFontDescriptor(descriptor, size, nil)
+        }
     }
 }
 
