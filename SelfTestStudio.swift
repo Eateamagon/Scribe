@@ -225,7 +225,11 @@ extension AppDelegate {
         let undoItem = NSMenuItem(title: "Undo", action: Selector(("undo:")), keyEquivalent: "z")
         check(window.validateMenuItem(undoItem), "Edit ▸ Undo is enabled with annotations on the step")
         let covers = guide.steps[0].redactions.count, drawings = guide.steps[0].markups.count
-        let sent = NSApp.sendAction(Selector(("undo:")), to: nil, from: undoItem)
+        // Walk the window's own responder chain rather than NSApp.sendAction(to: nil):
+        // that goes to the *key* window, and a test launched from a terminal while
+        // someone is using the Mac often is not key. ⌘Z takes this same chain.
+        Diag.log("SHOT-STUDIO: editor window is key: \(NSApp.keyWindow === window)")
+        let sent = (window.firstResponder ?? window).tryToPerform(Selector(("undo:")), with: undoItem)
         await pause(0.2)
         check(sent && guide.steps[0].redactions.count == covers - 1 && guide.steps[0].markups.count == drawings,
               "Edit ▸ Undo removed the newest annotation (the cover), not the arrow")
@@ -273,14 +277,18 @@ extension AppDelegate {
                                                  outputSize: CGSize(width: still.width, height: still.height))
         else { return false }
         let w = CGFloat(still.width), h = CGFloat(still.height)
-        let margin = max(w, h) / 60
-        let left = CGPoint(x: (n.minX * w - margin / 5) / w, y: n.midY)
-        let top = CGPoint(x: n.midX, y: (n.minY * h - margin / 5) / h)
+        // The renderer strokes a thin accent outline on the inset's edge. Look
+        // for it within a few pixels of where the canvas says each edge is.
         func isAccent(_ p: CGPoint) -> Bool {
             guard let px = Img.sample(still, at: p) else { return false }
             return px.r > 190 && px.g < 110 && px.b < 150
         }
-        return isAccent(left) && isAccent(top)
+        func edgeFound(_ probe: (CGFloat) -> CGPoint) -> Bool {
+            (-3...3).contains { isAccent(probe(CGFloat($0))) }
+        }
+        let left = edgeFound { CGPoint(x: (n.minX * w + $0) / w, y: n.midY) }
+        let top = edgeFound { CGPoint(x: n.midX, y: (n.minY * h + $0) / h) }
+        return left && top
     }
 
     private static func studioDescendants(of view: NSView) -> [NSView] {

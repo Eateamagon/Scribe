@@ -430,22 +430,8 @@ final class MarkupCanvas: NSView, NSTextFieldDelegate {
         let w = outputSize.width, h = outputSize.height
         let source = Geo.drawRect(area, in: w, h).intersection(CGRect(x: 0, y: 0, width: w, height: h))
         guard !source.isNull, source.width > 4, source.height > 4 else { return nil }
-        var size = CGSize(width: source.width * spotlight.zoom, height: source.height * spotlight.zoom)
-        let limit = CGSize(width: w * 0.45, height: h * 0.45)
-        let fit = min(limit.width / size.width, limit.height / size.height, 1)
-        size = CGSize(width: size.width * fit, height: size.height * fit)
-        let margin = max(w, h) / 60
-        let centre: CGPoint
-        if let inset = spotlight.inset {
-            centre = CGPoint(x: inset.x * w, y: (1 - inset.y) * h)
-        } else {
-            let right = source.midX < w / 2
-            let top = source.midY < h / 2
-            centre = CGPoint(x: right ? w - margin - size.width / 2 : margin + size.width / 2,
-                             y: top ? h - margin - size.height / 2 : margin + size.height / 2)
-        }
-        let frame = CGRect(x: centre.x - size.width / 2, y: centre.y - size.height / 2,
-                           width: size.width, height: size.height)
+        let frame = FrameRenderer.magnifierFrame(source: source, spotlight: spotlight,
+                                                 in: CGRect(x: 0, y: 0, width: w, height: h))
         return CGRect(x: frame.minX / w, y: 1 - frame.maxY / h,
                       width: frame.width / w, height: frame.height / h)
     }

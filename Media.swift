@@ -440,16 +440,9 @@ enum FrameRenderer {
         else { return image }
         ctx.draw(image, in: whole)
 
-        let longest = max(w, h)
-        let margin = longest / 60
-        let zoom = max(spotlight.zoom, 1)
-        var size = CGSize(width: source.width * zoom, height: source.height * zoom)
-        let limit = CGSize(width: w * 0.45, height: h * 0.45)
-        let fit = min(limit.width / size.width, limit.height / size.height, 1)
-        size = CGSize(width: (size.width * fit).rounded(), height: (size.height * fit).rounded())
-
-        let frame = insetFrame(size: size, avoiding: source, in: whole, margin: margin,
-                               requested: spotlight.inset)
+        let margin = max(w, h) / 60
+        let frame = magnifierFrame(source: source, spotlight: spotlight, in: whole)
+        let size = frame.size
         let corner = min(margin * 0.45, size.width / 2, size.height / 2)
         let outline = CGPath(roundedRect: frame, cornerWidth: corner, cornerHeight: corner,
                              transform: nil)
@@ -469,12 +462,27 @@ enum FrameRenderer {
         ctx.restoreGState()
 
         ctx.setStrokeColor(Annotator.accent)
-        ctx.setLineWidth(max(1.5, longest / 600))
+        ctx.setLineWidth(max(1.5, max(w, h) / 600))
         ctx.addPath(outline); ctx.strokePath()
         return ctx.makeImage()
     }
 
     /// Where the magnifier goes, in CG (bottom-left) coordinates.
+    /// Where the magnifier inset goes, in CG pixels (bottom-left) of an
+    /// output of `bounds` size, for a spotlit `source` rect in the same space.
+    /// The editor hit-tests the inset with this same function — two copies of
+    /// the arithmetic drifted apart once already.
+    static func magnifierFrame(source: CGRect, spotlight: Spotlight, in bounds: CGRect) -> CGRect {
+        let margin = max(bounds.width, bounds.height) / 60
+        let zoom = max(spotlight.zoom, 1)
+        var size = CGSize(width: source.width * zoom, height: source.height * zoom)
+        let limit = CGSize(width: bounds.width * 0.45, height: bounds.height * 0.45)
+        let fit = min(limit.width / size.width, limit.height / size.height, 1)
+        size = CGSize(width: (size.width * fit).rounded(), height: (size.height * fit).rounded())
+        return insetFrame(size: size, avoiding: source, in: bounds, margin: margin,
+                          requested: spotlight.inset)
+    }
+
     static func insetFrame(size: CGSize, avoiding source: CGRect, in bounds: CGRect,
                            margin: CGFloat, requested: CGPoint?) -> CGRect {
         func clamped(centre: CGPoint) -> CGRect {
