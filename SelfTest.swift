@@ -203,6 +203,7 @@ extension AppDelegate {
                     self?.exerciseCoverColour()
                     self?.exerciseRedactionFlattening()
                     self?.exerciseEditor()
+                    self?.exerciseFileNumbering()
                     Diag.log("SELFTEST-OFFLINE PASSED — \(self?.guide.folder.path ?? "")")
                 }
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { NSApp.terminate(nil) }
@@ -608,7 +609,7 @@ extension AppDelegate {
     /// A stand-in for a screenshot: a desktop-ish gradient with a button-shaped
     /// rectangle where the first step's target box is meant to land, so the
     /// annotation can be checked by eye rather than only by "it returned data".
-    private static func syntheticFrame() -> CGImage? {
+    static func syntheticFrame() -> CGImage? {
         let w = 1600, h = 1000
         guard let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8,
                                   bytesPerRow: 0, space: CGColorSpaceCreateDeviceRGB(),
@@ -704,5 +705,115 @@ extension AppDelegate {
         Diag.log("SELFTEST PASSED — session folder \(guide.folder.path)")
         // Give the log queue a beat to flush before the process goes away.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { NSApp.terminate(nil) }
+    }
+
+    /// After a step is deleted and the guide reopened, the next screenshot
+    /// must get a fresh number. It used to reuse `steps.count + 1`, which with
+    /// files shot-001…003 on disk and two steps left overwrote shot-003.
+    func exerciseFileNumbering() {
+        guard let frame = Self.syntheticFrame() else { return }
+        let scratch = Guide()
+        for _ in 0..<3 {
+            scratch.append(image: frame, click: CGPoint(x: 0.5, y: 0.5), target: nil,
+                           appName: "Finder", windowTitle: "", elementLabel: "", verb: "Click")
+        }
+        scratch.remove(at: 1)
+        let third = scratch.folder.appendingPathComponent("shot-003.png")
+        let before = try? Data(contentsOf: third)
+        let reopened = Guide()
+        reopened.load(from: scratch.folder)
+        let added = reopened.append(image: frame, click: CGPoint(x: 0.2, y: 0.2), target: nil,
+                                    appName: "Finder", windowTitle: "", elementLabel: "",
+                                    verb: "Click")
+        let after = try? Data(contentsOf: third)
+        let name = added?.imageURL.lastPathComponent ?? "nil"
+        let ok = name == "shot-004.png" && before != nil && before == after
+        Diag.log("SELFTEST-OFFLINE: file numbering after delete+reopen -> \(name); "
+                 + "shot-003 untouched=\(before == after)")
+        if !ok { Diag.log("SELFTEST-OFFLINE FAILED: a new shot reused a live file number") }
+    }
+
+    // MARK: Shared GIF fixtures
+
+    /// Appends a synthetic GIF step to `guide`: 40 frames at 10 fps of the
+    /// synthetic screen with a block sliding across it, a pointer track that
+    /// follows the block, and one click at 1.5 s on the "button". Shared by
+    /// the media, recorder and studio self-tests so they all exercise the
+    /// same footage.
+    @discardableResult
+    static func appendSyntheticGifStep(to guide: Guide) -> GuideStep? {
+        guard let base = syntheticFrame() else { return nil }
+        let number = guide.reserveFileNumber()
+        let folderName = String(format: "gif-%03d", number)
+        let clipFolder = guide.folder.appendingPathComponent(folderName, isDirectory: true)
+        try? FileManager.default.createDirectory(at: clipFolder, withIntermediateDirectories: true)
+
+        let w = base.width, h = base.height
+        var frames: [ClipFrame] = []
+        var pointer: [PointerSample] = []
+        var stillFrame: CGImage?
+        for i in 0..<40 {
+            let t = Double(i) / 10
+            guard let ctx = Img.bitmap(width: w, height: h) else { return nil }
+            ctx.draw(base, in: CGRect(x: 0, y: 0, width: w, height: h))
+            let x = 0.10 + 0.70 * CGFloat(i) / 39
+            let block = Geo.drawRect(CGRect(x: x, y: 0.70, width: 0.08, height: 0.10),
+                                     in: CGFloat(w), CGFloat(h))
+            ctx.setFillColor(CGColor(red: 0.20, green: 0.75, blue: 0.45, alpha: 1))
+            ctx.fill(block)
+            guard let image = ctx.makeImage() else { return nil }
+            let name = String(format: "frame-%04d.jpg", i + 1)
+            guard Img.writeJPEG(image, to: clipFolder.appendingPathComponent(name)) else { return nil }
+            frames.append(ClipFrame(file: name, time: t))
+            if i == 14 { stillFrame = image }
+            pointer.append(PointerSample(time: t, point: CGPoint(x: x + 0.04, y: 0.66)))
+        }
+        let click = CGPoint(x: 0.30, y: 0.415)
+        let target = CGRect(x: 0.22, y: 0.38, width: 0.16, height: 0.07)
+        let clicks = [ClipClick(time: 1.5, point: click, target: target,
+                                label: "New Folder", verb: "Click")]
+        let data = ClipData(frames: frames, pointer: pointer, clicks: clicks, duration: 4.0,
+                            pixelSize: CGSize(width: w, height: h),
+                            regionPoints: CGSize(width: w / 2, height: h / 2))
+        guard data.write(to: clipFolder), let still = stillFrame else { return nil }
+        let trim = GifClip.defaultTrim(for: data)
+        return guide.appendGif(number: number, still: still, click: click, target: target,
+                               appName: "Finder", windowTitle: "Animated Window",
+                               elementLabel: "New Folder", verb: "Click",
+                               clip: GifClip(folder: folderName, trimStart: trim.start,
+                                             trimEnd: trim.end))
+    }
+
+    // MARK: Fn probe
+
+    /// `--probe-fn`: logs every way of seeing the Fn/Globe key for 20 s, so a
+    /// person can hold Fn, an arrow key and Fn-click, and the log shows which
+    /// signal is trustworthy on this machine without any new permission.
+    func probeFn() {
+        Diag.log("PROBE-FN: starting — hold Fn, then an arrow key, then Fn+click, for 20 s")
+        var last = ""
+        let started = Date()
+        let timer = Timer(timeInterval: 0.05, repeats: true) { t in
+            MainActor.assumeIsolated {
+                let ns = NSEvent.modifierFlags.contains(.function)
+                let cg = CGEventSource.flagsState(.combinedSessionState).contains(.maskSecondaryFn)
+                let key = CGEventSource.keyState(.combinedSessionState, key: 0x3F)
+                let line = "ns=\(ns) cgFlags=\(cg) keyState=\(key)"
+                if line != last {
+                    Diag.log(String(format: "PROBE-FN %.2fs %@", Date().timeIntervalSince(started), line))
+                    last = line
+                }
+                if Date().timeIntervalSince(started) > 20 {
+                    t.invalidate()
+                    Diag.log("PROBE-FN: done")
+                    NSApp.terminate(nil)
+                }
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        let monitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown]) { event in
+            Diag.log("PROBE-FN click fnFlag=\(event.modifierFlags.contains(.function))")
+        }
+        _ = monitor
     }
 }

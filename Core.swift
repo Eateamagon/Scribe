@@ -287,6 +287,19 @@ enum Img {
                                         height: (h * scale).rounded())) ?? image
     }
 
+    /// A blank bitmap in the pixel format every renderer here uses.
+    static func bitmap(width: Int, height: Int) -> CGContext? {
+        CGContext(data: nil, width: width, height: height, bitsPerComponent: 8,
+                  bytesPerRow: 0, space: CGColorSpaceCreateDeviceRGB(),
+                  bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue
+                            | CGBitmapInfo.byteOrder32Little.rawValue)
+    }
+
+    static func writeJPEG(_ image: CGImage, to url: URL, quality: CGFloat = 0.85) -> Bool {
+        guard let data = jpegData(image, quality: quality) else { return false }
+        return (try? data.write(to: url, options: .atomic)) != nil
+    }
+
     static func redraw(_ image: CGImage, to size: CGSize) -> CGImage? {
         guard size.width >= 1, size.height >= 1,
               let ctx = CGContext(data: nil,
@@ -922,6 +935,35 @@ final class GuideStep {
     /// disagreeing, and no way to remove the one that is misleading.
     var showHighlight = true
 
+    /// Whether exports show the still or the animation. Only meaningful when
+    /// `gif` is set — a step recorded without Fn has no footage to show.
+    var media: StepMedia = .screenshot
+    /// Footage for a step recorded while Fn was held.
+    var gif: GifClip?
+    /// 0…1, top-left, against the stored image. Applied last when rendering.
+    var crop: CGRect?
+    var spotlight: Spotlight?
+    /// The screenshot file the step was recorded with, kept when "Use as
+    /// still" or "Replace image" points `imageURL` at a new file.
+    var originalImageName: String?
+
+    var hasFootage: Bool { gif != nil }
+    var isGIF: Bool { media == .gif && gif != nil }
+
+    var clipFolderURL: URL? {
+        gif.map { imageURL.deletingLastPathComponent().appendingPathComponent($0.folder) }
+    }
+
+    private var clipCache: ClipData?
+    /// Frames, pointer track and clicks — read from clip.json once.
+    var clipData: ClipData? {
+        if let clipCache { return clipCache }
+        guard let folder = clipFolderURL else { return nil }
+        clipCache = ClipData.load(from: folder)
+        return clipCache
+    }
+    func invalidateClipCache() { clipCache = nil }
+
     /// Next draw-order number across both lists.
     var nextSeq: Int {
         (redactions.map(\.seq) + markups.map(\.seq)).max().map { $0 + 1 } ?? 1
@@ -1104,14 +1146,11 @@ final class GuideStep {
     /// Redaction happens first and inside this one function on purpose — every
     /// export, every thumbnail and the editor preview all come through here, so
     /// none of them can render an unredacted step by forgetting a step.
+    ///
+    /// The work is `FrameRenderer.still`, which GIF frames share — this is the
+    /// main-actor doorway to it.
     func annotated(number: Int) -> CGImage? {
-        guard let raw = Img.readPNG(imageURL) else { return nil }
-        guard let clean = Annotator.redact(raw, with: redactions) else { return nil }
-        let highlighted = showHighlight
-            ? Annotator.annotate(clean, click: click, target: target, number: number)
-            : clean
-        guard let highlighted else { return nil }
-        return Annotator.draw(markups, on: highlighted)
+        FrameRenderer.still(renderSpec(number: number))
     }
 
     func thumbnail(number: Int) -> NSImage? {
@@ -1146,6 +1185,10 @@ final class GuideStep {
         if !redactions.isEmpty { d["redactions"] = redactions.map(\.dictionary) }
         if !markups.isEmpty { d["markups"] = markups.map(\.dictionary) }
         if !showHighlight { d["showHighlight"] = false }
+        if let gif { d["gif"] = gif.dictionary; d["media"] = media.rawValue }
+        if let crop { d["crop"] = RectCoding.dictionary(crop) }
+        if let spotlight { d["spotlight"] = spotlight.dictionary }
+        if let originalImageName { d["originalImage"] = originalImageName }
         if let t = target {
             d["targetX"] = t.minX; d["targetY"] = t.minY
             d["targetW"] = t.width; d["targetH"] = t.height
@@ -1175,6 +1218,12 @@ final class GuideStep {
             .compactMap(Redaction.from)
         step.markups = (d["markups"] as? [[String: Any]] ?? []).compactMap(Markup.from)
         step.showHighlight = d["showHighlight"] as? Bool ?? true
+        step.gif = (d["gif"] as? [String: Any]).flatMap(GifClip.from)
+        step.media = step.gif == nil ? .screenshot
+            : StepMedia(rawValue: d["media"] as? String ?? "") ?? .gif
+        step.crop = RectCoding.rect(d["crop"])
+        step.spotlight = (d["spotlight"] as? [String: Any]).flatMap(Spotlight.from)
+        step.originalImageName = d["originalImage"] as? String
         return step
     }
 }
@@ -1200,13 +1249,20 @@ final class Guide {
         return root.appendingPathComponent(f.string(from: Date()), isDirectory: true)
     }
 
+    /// `SCRIBE_DATA_ROOT` redirects everything to another folder. Self-tests
+    /// and parallel development builds set it so their synthetic guides never
+    /// land in the real library next to the user's recordings.
     static var root: URL {
-        FileManager.default
+        if let override = ProcessInfo.processInfo.environment["SCRIBE_DATA_ROOT"],
+           !override.isEmpty {
+            return URL(fileURLWithPath: override, isDirectory: true)
+        }
+        return FileManager.default
             .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("Scribe", isDirectory: true)
     }
 
-    private func ensureFolder() {
+    func ensureFolder() {
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
     }
 
@@ -1235,7 +1291,10 @@ final class Guide {
         steps = raw.compactMap { GuideStep.from($0, folder: folder) }
             .filter { FileManager.default.fileExists(atPath: $0.imageURL.path) }
         // Keep new screenshots from overwriting the ones already in the folder.
-        shotCounter = steps.count
+        // Not `steps.count`: deleting a step leaves its file behind, so a guide
+        // holding shot-001 and shot-003 has two steps, and counting would hand
+        // out shot-003 again — overwriting a live step's picture.
+        shotCounter = Guide.highestFileNumber(in: folder)
         changed()
         return !steps.isEmpty
     }
@@ -1254,11 +1313,8 @@ final class Guide {
 
     /// The most recent session folder that actually has steps in it, or nil.
     static func mostRecentFolder() -> URL? {
-        let root = FileManager.default
-            .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("Scribe", isDirectory: true)
         let folders = (try? FileManager.default.contentsOfDirectory(
-            at: root, includingPropertiesForKeys: [.contentModificationDateKey],
+            at: Guide.root, includingPropertiesForKeys: [.contentModificationDateKey],
             options: [.skipsHiddenFiles])) ?? []
         return folders
             .filter { hasSteps($0) }
@@ -1291,6 +1347,27 @@ final class Guide {
         changed()
     }
 
+    /// The largest NNN among `shot-NNN*.png` files and `gif-NNN` folders.
+    /// Shots and clips share one sequence so a step's files line up.
+    static func highestFileNumber(in folder: URL) -> Int {
+        let names = (try? FileManager.default.contentsOfDirectory(atPath: folder.path)) ?? []
+        return names.compactMap { name -> Int? in
+            let rest: Substring
+            if name.hasPrefix("shot-") { rest = name.dropFirst(5) }
+            else if name.hasPrefix("gif-") { rest = name.dropFirst(4) }
+            else { return nil }
+            return Int(rest.prefix(while: \.isNumber))
+        }.max() ?? 0
+    }
+
+    /// Hands out the next file number. Also used by the GIF recorder, which
+    /// needs its clip folder before the step exists.
+    func reserveFileNumber() -> Int {
+        ensureFolder()
+        shotCounter = max(shotCounter, Guide.highestFileNumber(in: folder)) + 1
+        return shotCounter
+    }
+
     /// Writes the screenshot and appends the step. Returns nil if the PNG could
     /// not be written, in which case the click is dropped rather than becoming
     /// a step with no picture.
@@ -1298,9 +1375,8 @@ final class Guide {
     func append(image: CGImage, click: CGPoint, target: CGRect?,
                 appName: String, windowTitle: String, elementLabel: String,
                 verb: String) -> GuideStep? {
-        shotCounter += 1
-        ensureFolder()
-        let url = folder.appendingPathComponent(String(format: "shot-%03d.png", shotCounter))
+        let number = reserveFileNumber()
+        let url = folder.appendingPathComponent(String(format: "shot-%03d.png", number))
         guard Img.writePNG(Img.downscale(image), to: url) else {
             Diag.log("FAILED to write \(url.lastPathComponent)")
             return nil
@@ -1331,6 +1407,20 @@ final class Guide {
         return target
     }
 
+    /// Drag-reorder: takes the step at `from` and inserts it so it ends up at
+    /// `to` (an index in the final order). Returns where it landed.
+    @discardableResult
+    func move(from: Int, to: Int) -> Int {
+        guard steps.indices.contains(from) else { return from }
+        let destination = min(max(to, 0), steps.count - 1)
+        guard destination != from else { return from }
+        let step = steps.remove(at: from)
+        steps.insert(step, at: destination)
+        renumberThumbnails(from: min(from, destination))
+        changed(.structure)
+        return destination
+    }
+
     // MARK: Redactions
 
     func addRedaction(_ redaction: Redaction, at index: Int) {
@@ -1340,7 +1430,7 @@ final class Guide {
         stamped.seq = steps[index].nextSeq
         steps[index].redactions.append(stamped)
         steps[index].invalidateThumbnail()
-        changed()
+        changed(.image, index: index)
     }
 
     func addMarkup(_ markup: Markup, at index: Int) {
@@ -1350,14 +1440,14 @@ final class Guide {
         stamped.seq = steps[index].nextSeq
         steps[index].markups.append(stamped)
         steps[index].invalidateThumbnail()
-        changed()
+        changed(.image, index: index)
     }
 
     func setShowHighlight(_ show: Bool, at index: Int) {
         guard steps.indices.contains(index), steps[index].showHighlight != show else { return }
         steps[index].showHighlight = show
         steps[index].invalidateThumbnail()
-        changed()
+        changed(.image, index: index)
     }
 
     /// Removes whatever is under `point` — cover or drawing, whichever was
@@ -1384,7 +1474,7 @@ final class Guide {
             return false
         }
         step.invalidateThumbnail()
-        changed()
+        changed(.image, index: index)
         return true
     }
 
@@ -1404,7 +1494,7 @@ final class Guide {
             step.redactions.remove(at: i)
         }
         step.invalidateThumbnail()
-        changed()
+        changed(.image, index: index)
     }
 
     func clearAnnotations(at index: Int) {
@@ -1412,7 +1502,7 @@ final class Guide {
         steps[index].redactions.removeAll()
         steps[index].markups.removeAll()
         steps[index].invalidateThumbnail()
-        changed()
+        changed(.image, index: index)
     }
 
     /// Copies one step's redactions onto every other step.
@@ -1435,7 +1525,7 @@ final class Guide {
             }
             if added { steps[i].invalidateThumbnail(); changedCount += 1 }
         }
-        if changedCount > 0 { changed() }
+        if changedCount > 0 { changed(.image) }
         return changedCount
     }
 
@@ -1451,6 +1541,25 @@ final class Guide {
     func flattenRedactions() -> Int {
         var flattened = 0
         for step in steps where !step.redactions.isEmpty {
+            // Footage first: a cover that only reached the still would leave
+            // the name readable in every frame of the GIF.
+            if let data = step.clipData, let clipFolder = step.clipFolderURL {
+                for frame in data.frames {
+                    let url = clipFolder.appendingPathComponent(frame.file)
+                    guard let raw = Img.readPNG(url),
+                          let clean = Annotator.redact(raw, with: step.redactions),
+                          Img.writeJPEG(clean, to: url, quality: 0.9)
+                    else { Diag.log("flatten FAILED for \(frame.file)"); continue }
+                }
+            }
+            if let original = step.originalImageName,
+               original != step.imageURL.lastPathComponent {
+                let url = folder.appendingPathComponent(original)
+                if let raw = Img.readPNG(url),
+                   let clean = Annotator.redact(raw, with: step.redactions) {
+                    _ = Img.writePNG(clean, to: url)
+                }
+            }
             guard let raw = Img.readPNG(step.imageURL),
                   let clean = Annotator.redact(raw, with: step.redactions),
                   Img.writePNG(clean, to: step.imageURL)
@@ -1462,14 +1571,154 @@ final class Guide {
             step.invalidateThumbnail()
             flattened += 1
         }
-        if flattened > 0 { changed() }
+        if flattened > 0 { changed(.image) }
         return flattened
+    }
+
+    // MARK: Media edits
+    //
+    // Everything here is non-destructive except `flattenRedactions`: crop,
+    // spotlight, trim and "use as still" are all stored as settings or as a
+    // new file beside the old one, so any of them can be undone.
+
+    /// Appends a step that carries footage. The recorder has already written
+    /// the frames and clip.json into `gif-NNN/` using a number from
+    /// `reserveFileNumber()`; this writes the still as `shot-NNN.png`.
+    @discardableResult
+    func appendGif(number: Int, still: CGImage, click: CGPoint, target: CGRect?,
+                   appName: String, windowTitle: String, elementLabel: String,
+                   verb: String, clip: GifClip, showHighlight: Bool = true) -> GuideStep? {
+        ensureFolder()
+        let url = folder.appendingPathComponent(String(format: "shot-%03d.png", number))
+        guard Img.writePNG(Img.downscale(still), to: url) else {
+            Diag.log("FAILED to write \(url.lastPathComponent)")
+            return nil
+        }
+        let step = GuideStep(imageURL: url, click: click, target: target,
+                             appName: appName, windowTitle: windowTitle,
+                             elementLabel: elementLabel, verb: verb)
+        step.gif = clip
+        step.media = .gif
+        step.showHighlight = showHighlight
+        steps.append(step)
+        changed(.structure, index: steps.count - 1)
+        return step
+    }
+
+    /// nil, or anything that is (nearly) the whole picture, removes the crop.
+    func setCrop(_ crop: CGRect?, at index: Int) {
+        guard steps.indices.contains(index) else { return }
+        var value = crop?.intersection(CGRect(x: 0, y: 0, width: 1, height: 1))
+        if let v = value, v.isNull || v.width < 0.04 || v.height < 0.04 { return }
+        if let v = value, v.width > 0.995, v.height > 0.995 { value = nil }
+        guard steps[index].crop != value else { return }
+        steps[index].crop = value
+        steps[index].invalidateThumbnail()
+        changed(.image, index: index)
+    }
+
+    func setSpotlight(_ spotlight: Spotlight?, at index: Int) {
+        guard steps.indices.contains(index), steps[index].spotlight != spotlight else { return }
+        steps[index].spotlight = spotlight
+        steps[index].invalidateThumbnail()
+        changed(.image, index: index)
+    }
+
+    /// Refused (returns false) when asking for GIF on a step with no footage.
+    @discardableResult
+    func setMedia(_ media: StepMedia, at index: Int) -> Bool {
+        guard steps.indices.contains(index) else { return false }
+        let step = steps[index]
+        if media == .gif && !step.hasFootage { return false }
+        guard step.media != media else { return true }
+        step.media = media
+        step.invalidateThumbnail()
+        changed(.image, index: index)
+        return true
+    }
+
+    func setTrim(start: Double, end: Double, at index: Int) {
+        guard steps.indices.contains(index), var clip = steps[index].gif else { return }
+        let duration = steps[index].clipData?.duration ?? max(end, clip.trimEnd)
+        let s = min(max(start, 0), duration)
+        let e = min(max(end, s + 0.3), duration)
+        guard s != clip.trimStart || e != clip.trimEnd else { return }
+        clip.trimStart = s
+        clip.trimEnd = e
+        steps[index].gif = clip
+        changed(.image, index: index)
+    }
+
+    func setShowPointer(_ show: Bool, at index: Int) {
+        guard steps.indices.contains(index), var clip = steps[index].gif,
+              clip.showPointer != show else { return }
+        clip.showPointer = show
+        steps[index].gif = clip
+        changed(.image, index: index)
+    }
+
+    /// Makes the footage frame at `time` the step's screenshot. The original
+    /// file is kept, so `revertStill` can go back.
+    @discardableResult
+    func useFrameAsStill(at time: Double, index: Int) -> Bool {
+        guard steps.indices.contains(index) else { return false }
+        let step = steps[index]
+        guard let data = step.clipData, let clipFolder = step.clipFolderURL,
+              let i = data.frameIndex(at: time),
+              let frame = Img.readPNG(clipFolder.appendingPathComponent(data.frames[i].file))
+        else { return false }
+        let original = step.originalImageName ?? step.imageURL.lastPathComponent
+        let stem = (original as NSString).deletingPathExtension
+        let url = folder.appendingPathComponent("\(stem)-still.png")
+        guard Img.writePNG(frame, to: url) else { return false }
+        step.originalImageName = original
+        step.imageURL = url
+        step.invalidateThumbnail()
+        changed(.image, index: index)
+        return true
+    }
+
+    func revertStill(at index: Int) {
+        guard steps.indices.contains(index),
+              let original = steps[index].originalImageName else { return }
+        let url = folder.appendingPathComponent(original)
+        guard FileManager.default.fileExists(atPath: url.path) else { return }
+        steps[index].imageURL = url
+        steps[index].originalImageName = nil
+        steps[index].invalidateThumbnail()
+        changed(.image, index: index)
+    }
+
+    /// Swaps in a different picture, keeping the step's words. Everything
+    /// that described the old picture — covers, drawings, crop, spotlight, the
+    /// automatic highlight, the footage — goes, because none of it lines up
+    /// with the new one. The old files stay on disk.
+    @discardableResult
+    func replaceImage(_ image: CGImage, at index: Int) -> Bool {
+        guard steps.indices.contains(index) else { return false }
+        let number = reserveFileNumber()
+        let url = folder.appendingPathComponent(String(format: "shot-%03d.png", number))
+        guard Img.writePNG(Img.downscale(image), to: url) else { return false }
+        let step = steps[index]
+        step.imageURL = url
+        step.originalImageName = nil
+        step.redactions.removeAll()
+        step.markups.removeAll()
+        step.crop = nil
+        step.spotlight = nil
+        step.showHighlight = false
+        step.gif = nil
+        step.media = .screenshot
+        step.invalidateClipCache()
+        step.invalidateThumbnail()
+        changed(.image, index: index)
+        return true
     }
 
     func setNote(_ text: String, at index: Int) {
         guard steps.indices.contains(index) else { return }
         steps[index].note = text
-        changed()
+        changed(.text, index: index)
     }
 
     /// Step numbers are burned into the thumbnails, so anything that shifts
@@ -1478,9 +1727,22 @@ final class Guide {
         for i in index..<steps.count { steps[i].invalidateThumbnail() }
     }
 
-    private func changed() {
+    /// What kind of edit happened, posted as `userInfo["kind"]` (and the step
+    /// as `userInfo["index"]` when it was one step). Lets the editor refresh one
+    /// row instead of reloading everything — reloading under a text view that
+    /// is being typed in resets its cursor.
+    enum Change: String {
+        case structure      // steps added, removed, reordered, guide swapped
+        case text           // a step's note
+        case image          // pixels changed: annotations, crop, spotlight, media, trim
+        case title
+    }
+
+    func changed(_ kind: Change = .structure, index: Int? = nil) {
         save()
-        NotificationCenter.default.post(name: Guide.didChange, object: nil)
+        var info: [String: Any] = ["kind": kind.rawValue]
+        if let index { info["index"] = index }
+        NotificationCenter.default.post(name: Guide.didChange, object: nil, userInfo: info)
     }
 
     func save() {

@@ -31,8 +31,9 @@ MSG
   exit 1
 fi
 
-# A running copy holds the old binary open.
-if pgrep -x "$BIN" >/dev/null 2>&1; then
+# A running copy holds the old binary open. SCRIBE_NO_KILL=1 skips this, for
+# builds that must not stop another copy's test run.
+if [ -z "${SCRIBE_NO_KILL:-}" ] && pgrep -x "$BIN" >/dev/null 2>&1; then
   echo "Quitting the running copy..."
   killall "$BIN" 2>/dev/null || true
   sleep 1
@@ -109,7 +110,8 @@ fi
 
 # Every source file, explicitly — a *.swift glob would pick up stray scripts.
 # main.swift must stay named that: it holds the top-level entry code.
-SOURCES=(main.swift Core.swift Capture.swift Export.swift Editor.swift SelfTest.swift)
+SOURCES=(main.swift Core.swift Media.swift Capture.swift Recorder.swift Export.swift Editor.swift
+         SelfTest.swift SelfTestMedia.swift SelfTestRecorder.swift SelfTestStudio.swift)
 
 swiftc -O \
   -framework Cocoa \

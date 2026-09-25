@@ -137,7 +137,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             Task { @MainActor [weak self] in self?.startNewGuide() }
         }
 
-        if CommandLine.arguments.contains("--shot-themes") { shotThemes() }
+        if CommandLine.arguments.contains("--probe-fn") { probeFn() }
+        else if CommandLine.arguments.contains("--selftest-media") { runMediaSelfTest() }
+        else if CommandLine.arguments.contains("--selftest-gif") { runRecorderSelfTest() }
+        else if CommandLine.arguments.contains("--shot-studio") { shotStudio() }
+        else if CommandLine.arguments.contains("--shot-themes") { shotThemes() }
         else if CommandLine.arguments.contains("--shot-pdf") { shotPDF() }
         else if CommandLine.arguments.contains("--shot-nameprompt") { shotNamePrompt() }
         else if CommandLine.arguments.contains("--dump-context") { dumpContext() }

@@ -829,3 +829,22 @@ enum Export {
          .replacingOccurrences(of: "\"", with: "&quot;")
     }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MARK: - Async doorways
+//
+// What the editor calls. A guide with GIF steps takes seconds to encode, so
+// these are where that work moves off the main thread; callers show
+// "Rendering GIFs…" while they wait. The synchronous functions above stay
+// correct on their own (self-tests use them).
+// ─────────────────────────────────────────────────────────────────────────────
+
+extension Export {
+    static func htmlAsync(_ guide: Guide) async -> String { html(guide) }
+    static func emailHTMLAsync(_ guide: Guide) async -> String { emailHTML(guide) }
+    /// Returns the byte count put on the clipboard.
+    static func copyForEmailAsync(_ guide: Guide) async -> Int { copyForEmail(guide) }
+    static func markdownAsync(_ guide: Guide, to folder: URL) async throws {
+        try markdown(guide, to: folder)
+    }
+}
