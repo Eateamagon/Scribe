@@ -104,6 +104,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var lastClickAt = Date.distantPast
     var lastClickPoint = CGPoint.zero
 
+    /// GIF steps: Fn held (or ⌃⌥⌘F toggled) records one step as footage.
+    let fnMonitor = FnMonitor()
+    let gifRecorder = GifRecorder()
+    let gifHUD = GifHUD()
+    let globeNotice = GlobeKeyNotice()
+    /// Started by ⌃⌥⌘F rather than by holding Fn — the Fn state is ignored
+    /// until the hotkey is pressed again.
+    var gifToggleMode = false
+    /// The 15 s cap ended a clip while Fn was still held. Until Fn comes up,
+    /// Fn-clicks are ordinary steps rather than the start of another clip.
+    var fnCapped = false
+
     // MARK: Lifecycle
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -120,6 +132,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         buildMainMenu()
         buildStatusItem()
+        configureGifRecording()
 
         // ⌃⌥⌘R toggles recording, ⌃⌥⌘E opens the editor. Carbon hotkeys need no
         // permission, so they work even before anything has been granted.
@@ -135,6 +148,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         HotKeyCenter.shared.register(keyCode: 45, modifiers: mods) {   // N
             Task { @MainActor [weak self] in self?.startNewGuide() }
+        }
+        // ⌃⌥⌘F starts and stops a GIF step, for a Mac where holding Fn is
+        // unreliable or already means something. HotKeyCenter fires on main.
+        HotKeyCenter.shared.register(keyCode: 3, modifiers: mods) { [weak self] in  // F
+            MainActor.assumeIsolated { self?.toggleGifRecording() }
         }
 
         if CommandLine.arguments.contains("--probe-fn") { probeFn() }
@@ -154,6 +172,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        if gifRecorder.isRecording { endClip(presentPrompt: false) }
         prompt.commitCurrent()
         capture.stop()
         guide.save()
@@ -221,12 +240,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             MainActor.assumeIsolated { self?.handleClick(event) }
         }
 
+        gifToggleMode = false
+        fnCapped = false
+        fnMonitor.start()
+
         Diag.log("recording started (guide has \(guide.count) step(s))")
         refreshStatusItem()
+        globeNotice.showIfNeeded()
     }
 
     func stopRecording(openEditor showEditor: Bool) {
         guard isRecording else { return }
+        // A clip in progress becomes its step before anything shuts down —
+        // the capture stream included, since the clip's last frame comes from
+        // it. No prompt: the recording is ending and the editor is next.
+        if gifRecorder.isRecording { endClip(presentPrompt: false) }
+        fnMonitor.stop()
+        gifToggleMode = false
+        fnCapped = false
+        gifHUD.hide()
         isRecording = false
         prompt.commitCurrent()
 
@@ -247,6 +279,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// prompt box does not become a step.
     func handleClick(_ event: NSEvent) {
         guard isRecording else { return }
+        if routeToClip(event) { return }
         let point = NSEvent.mouseLocation
         guard let screen = Geo.screen(containing: point) else { return }
         let displayID = Geo.displayID(of: screen)
@@ -370,6 +403,237 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if mods.contains(.control) { parts.append("Control") }
         guard !parts.isEmpty else { return "Click" }
         return parts.joined(separator: "-") + "-click"
+    }
+
+    // MARK: GIF steps
+    //
+    // The recorder does the work (Recorder.swift); this is the wiring: which
+    // clicks belong to a clip, when one starts and ends, and the one prompt
+    // the finished step gets.
+
+    func configureGifRecording() {
+        capture.onFrame = { [weak self] id, image in
+            self?.gifRecorder.ingest(image, displayID: id)
+        }
+        fnMonitor.onDown = { [weak self] in self?.fnWentDown() }
+        fnMonitor.onUp = { [weak self] in self?.fnWentUp() }
+        fnMonitor.onTick = { [weak self] in self?.gifTick() }
+        gifRecorder.onCap = { [weak self] in self?.clipHitCap() }
+    }
+
+    private func fnWentDown() {
+        guard isRecording, !gifToggleMode, !fnCapped, !gifRecorder.isRecording else { return }
+        beginClip()
+    }
+
+    private func fnWentUp() {
+        fnCapped = false
+        guard !gifToggleMode, gifRecorder.isRecording else { return }
+        endClip()
+    }
+
+    private func gifTick() {
+        guard gifRecorder.isRecording else { return }
+        gifRecorder.samplePointer(NSEvent.mouseLocation)
+        gifHUD.update(elapsed: gifRecorder.elapsed)
+    }
+
+    private func clipHitCap() {
+        // Fn may well still be held. Without this the next Fn-click would
+        // start a second clip straight away, which nobody asked for.
+        if !gifToggleMode { fnCapped = fnMonitor.isDown }
+        endClip(flash: "GIF stopped at \(Int(GifRecorder.maxDuration)) s")
+    }
+
+    /// ⌃⌥⌘F: the same clip as holding Fn, started and stopped by the hotkey.
+    @objc func toggleGifRecording() {
+        guard isRecording else {
+            Diag.log("GIF: ⌃⌥⌘F ignored — not recording")
+            return
+        }
+        if gifRecorder.isRecording { endClip(); return }
+        gifToggleMode = beginClip()
+    }
+
+    /// The region is decided NOW, from what is under the pointer — the same
+    /// `captureRegion` a still step uses, so a GIF step and the still steps
+    /// around it are cropped alike. Returns false if no clip started.
+    @discardableResult
+    func beginClip() -> Bool {
+        guard isRecording, !gifRecorder.isRecording else { return false }
+        let point = NSEvent.mouseLocation
+        guard let screen = Geo.screen(containing: point) else { return false }
+        let displayID = Geo.displayID(of: screen)
+        let target = AXInspector.inspect(at: point)
+        guard let region = clipRegion(for: target, on: screen) else {
+            Diag.log("GIF: not started — the pointer is outside the app this recording is "
+                     + "scoped to, and that app has no window to use instead")
+            return false
+        }
+        // The step prompt is a key panel. Left open, whatever the demo types
+        // would go into it instead of into the app being recorded.
+        prompt.commitCurrent()
+
+        let seed = capture.frame(for: displayID)
+        let number = guide.reserveFileNumber()
+        gifRecorder.showPointer = Settings.shared.showPointerInNewGifs
+        guard gifRecorder.begin(number: number, guideFolder: guide.folder,
+                                displayID: displayID, region: region, screen: screen,
+                                context: target, seed: seed)
+        else { return false }
+        if seed == nil {
+            Diag.log("GIF: no frame yet on display \(displayID) — the clip starts with the next one")
+        }
+        gifRecorder.samplePointer(point)
+        // A double-click has to stay inside the clip, never reach back and
+        // relabel the step before it.
+        lastStep = nil
+        gifHUD.show(on: screen)
+        refreshStatusItem()
+        return true
+    }
+
+    /// `captureRegion`, except that `.app` scope with the pointer elsewhere
+    /// is not a reason to drop the clip: Fn-down is not a click, and the
+    /// pointer is often on its way into the app. That app's own window is the
+    /// region instead, when there is one.
+    func clipRegion(for target: ClickTarget, on screen: NSScreen) -> CGRect? {
+        if let region = captureRegion(for: target, on: screen) { return region }
+        guard case .app(let bundleID, _) = Settings.shared.captureScope,
+              let window = AXInspector.focusedWindowFrame(ofBundleID: bundleID)
+        else { return nil }
+        return Geo.sanitize(region: Geo.localRect(axRect: window, on: screen), on: screen)
+    }
+
+    /// Finishes the clip and appends its step. `presentPrompt` is false when
+    /// something else is about to take over — the recording stopping, or a
+    /// plain click that will open its own prompt.
+    func endClip(presentPrompt: Bool = true, flash: String? = nil) {
+        guard gifRecorder.isRecording else { return }
+        let screen = Geo.screen(containing: NSEvent.mouseLocation)
+        let finalFrame = capture.frame(for: gifRecorder.displayID)
+        let result = gifRecorder.finish(finalFrame: finalFrame)
+        gifToggleMode = false
+        if let flash { gifHUD.flash(flash, on: screen) } else { gifHUD.hide() }
+        defer { refreshStatusItem() }
+
+        guard let result else { removeGuideFolderIfUnused(); return }
+        guard let step = guide.appendGif(number: result.number, still: result.still,
+                                         click: result.click, target: result.target,
+                                         appName: result.appName,
+                                         windowTitle: result.windowTitle,
+                                         elementLabel: result.label, verb: result.verb,
+                                         clip: result.clip,
+                                         showHighlight: result.showHighlight)
+        else { return }
+        lastStep = nil
+        lastClickAt = .distantPast
+        library?.reload()
+
+        guard presentPrompt else { return }
+        prompt.present(number: guide.count,
+                       placeholder: step.autoText,
+                       near: NSEvent.mouseLocation,
+                       avoiding: nil) { [weak self, weak step] text in
+            guard let self, let step else { return }
+            if !text.isEmpty {
+                step.note = text
+                self.guide.save()
+                NotificationCenter.default.post(name: Guide.didChange, object: nil)
+            }
+        }
+    }
+
+    /// A discarded first clip must not leave an empty session folder behind
+    /// ("Session folders are created lazily" in CLAUDE.md).
+    private func removeGuideFolderIfUnused() {
+        guard guide.isEmpty,
+              let contents = try? FileManager.default.contentsOfDirectory(atPath: guide.folder.path),
+              contents.filter({ $0 != ".DS_Store" }).isEmpty
+        else { return }
+        try? FileManager.default.removeItem(at: guide.folder)
+    }
+
+    /// Clicks that belong to a clip rather than becoming steps of their own.
+    /// Returns true when the click has been dealt with.
+    private func routeToClip(_ event: NSEvent) -> Bool {
+        // The click's own flag or the live state: either is enough to say Fn
+        // is down. `FnMonitor.fnIsDown` is where the signal source is chosen.
+        let fnHeld = event.modifierFlags.contains(.function) || FnMonitor.fnIsDown()
+
+        if gifRecorder.isRecording {
+            if gifToggleMode || fnHeld { addClipClick(event); return true }
+            // Fn is already up; the 80 ms release debounce just has not fired.
+            // The click is after the clip: close it, and let the click be an
+            // ordinary step with its own (single) prompt.
+            endClip(presentPrompt: false)
+            return false
+        }
+
+        // Fn-click before the 150 ms hold registered: start the clip on the
+        // click itself rather than losing the click to a still step.
+        guard fnHeld, !fnCapped, beginClip() else { return false }
+        fnMonitor.assumeDown()
+        addClipClick(event)
+        return true
+    }
+
+    private func addClipClick(_ event: NSEvent) {
+        let point = NSEvent.mouseLocation
+        let elapsed = Date().timeIntervalSince(lastClickAt)
+        let moved = hypot(point.x - lastClickPoint.x, point.y - lastClickPoint.y)
+        if event.type == .leftMouseDown, event.clickCount >= 2,
+           elapsed < 0.6, moved < 6, gifRecorder.hasClicks {
+            gifRecorder.updateLastClickVerb("Double-click")
+            lastClickAt = Date()
+            return
+        }
+        // Frame first, then Accessibility, exactly as `handleClick` does: the
+        // click is already changing the screen and the element under it.
+        let frame = capture.frame(for: gifRecorder.displayID)
+        let target = AXInspector.inspect(at: point)
+        gifRecorder.addClick(at: point, target: target, verb: verb(for: event),
+                             preClickFrame: frame)
+        if frame != nil && !sawFirstFrame { sawFirstFrame = true }
+        lastClickAt = Date()
+        lastClickPoint = point
+    }
+
+    @objc func toggleShowPointerInGifs() {
+        Settings.shared.showPointerInNewGifs.toggle()
+        Diag.log("show pointer in new GIFs = \(Settings.shared.showPointerInNewGifs)")
+        refreshStatusItem()
+    }
+
+    /// "GIF Steps ▸" in the status menu.
+    func buildGifItem() -> NSMenuItem {
+        let item = NSMenuItem(title: "GIF Steps", action: nil, keyEquivalent: "")
+        let submenu = NSMenu()
+        submenu.addItem(disabled("Hold Fn while clicking to record a GIF step"))
+        submenu.addItem(disabled("Release Fn to finish — \(Int(GifRecorder.maxDuration)) s at most"))
+        submenu.addItem(.separator())
+
+        let toggle = NSMenuItem(title: gifRecorder.isRecording ? "Stop GIF Recording"
+                                                               : "Toggle GIF Recording",
+                                action: #selector(toggleGifRecording), keyEquivalent: "f")
+        toggle.keyEquivalentModifierMask = [.control, .option, .command]
+        toggle.target = self
+        toggle.isEnabled = isRecording
+        toggle.toolTip = isRecording
+            ? "Start or stop a GIF step without holding Fn."
+            : "Available while recording."
+        submenu.addItem(toggle)
+
+        let pointer = NSMenuItem(title: "Show Pointer in New GIFs",
+                                 action: #selector(toggleShowPointerInGifs), keyEquivalent: "")
+        pointer.target = self
+        pointer.state = Settings.shared.showPointerInNewGifs ? .on : .off
+        pointer.toolTip = "Draw the pointer and click ripples in GIFs recorded from now on. "
+            + "Each GIF step can still be switched in the editor."
+        submenu.addItem(pointer)
+
+        item.submenu = submenu
+        return item
     }
 
     // MARK: Editor
@@ -508,17 +772,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func refreshStatusItem() {
         guard let button = statusItem?.button else { return }
+        // A clip gets its own look — orange, and "GIF" in place of the count —
+        // because releasing Fn is what ends it, and you need to be able to see
+        // at a glance that one is running.
+        let clip = gifRecorder.isRecording
         let symbol = isRecording ? "record.circle.fill" : "list.bullet.rectangle"
         let image = NSImage(systemSymbolName: symbol, accessibilityDescription: "Scribe")
         image?.isTemplate = !isRecording
         button.image = image
-        button.contentTintColor = isRecording
-            ? NSColor(calibratedRed: 0.94, green: 0.16, blue: 0.35, alpha: 1) : nil
-        button.title = isRecording
-            ? (sawFirstFrame ? " \(guide.count)" : " …")
-            : (guide.isEmpty ? "" : " \(guide.count)")
-        button.toolTip = isRecording ? "Scribe is recording — ⌃⌥⌘R to stop"
-                                     : "Scribe — ⌃⌥⌘R to record"
+        button.contentTintColor = clip
+            ? NSColor(calibratedRed: 0.98, green: 0.45, blue: 0.10, alpha: 1)
+            : (isRecording ? NSColor(calibratedRed: 0.94, green: 0.16, blue: 0.35, alpha: 1) : nil)
+        button.title = clip ? " GIF"
+            : isRecording
+                ? (sawFirstFrame ? " \(guide.count)" : " …")
+                : (guide.isEmpty ? "" : " \(guide.count)")
+        button.toolTip = clip ? "Scribe is recording a GIF step — release Fn (or ⌃⌥⌘F) to finish"
+            : isRecording ? "Scribe is recording — ⌃⌥⌘R to stop"
+                          : "Scribe — ⌃⌥⌘R to record"
         statusItem.menu = buildMenu()
     }
 
@@ -576,6 +847,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         menu.addItem(.separator())
         menu.addItem(buildCaptureScopeItem())
+        menu.addItem(buildGifItem())
 
         menu.addItem(.separator())
         menu.addItem(disabled(guide.isEmpty

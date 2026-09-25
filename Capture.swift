@@ -32,7 +32,8 @@ import VideoToolbox
 /// Receives frames on ScreenCaptureKit's own queue. Split out so `Capture` can
 /// stay main-actor isolated: this is the only genuinely off-thread code here.
 private final class DisplayStreamOutput: NSObject, SCStreamOutput, @unchecked Sendable {
-    var onFrame: ((CGImage) -> Void)?
+    /// Always invoked on the main thread (see the hop below).
+    var onFrame: (@MainActor (CGImage) -> Void)?
 
     func stream(_ stream: SCStream,
                 didOutputSampleBuffer sampleBuffer: CMSampleBuffer,
@@ -84,6 +85,11 @@ final class Capture: NSObject, SCStreamDelegate {
     /// rebuild and says "denied" while capture actually works.
     private(set) var permissionDenied = false
     var onPermissionDenied: (() -> Void)?
+
+    /// Every frame from every display, on the main actor, as it arrives. The
+    /// GIF recorder listens here while a clip is running; still steps never
+    /// need it — they read `frame(for:)` at click time.
+    var onFrame: (@MainActor (CGDirectDisplayID, CGImage) -> Void)?
 
     var isRunning: Bool { !boxes.isEmpty }
 
@@ -186,7 +192,10 @@ final class Capture: NSObject, SCStreamDelegate {
         guard box.stream == nil, !box.starting else { return }
         box.starting = true
 
-        box.output.onFrame = { [weak box] image in box?.latest = image }
+        box.output.onFrame = { [weak self, weak box] image in
+            box?.latest = image
+            self?.onFrame?(id, image)
+        }
 
         let filter = SCContentFilter(display: display,
                                      excludingApplications: mine,
@@ -199,7 +208,13 @@ final class Capture: NSObject, SCStreamDelegate {
         cfg.showsCursor = false          // the highlight marks the spot, not the arrow
         cfg.captureResolution = .best
         cfg.pixelFormat = kCVPixelFormatType_32BGRA
-        cfg.queueDepth = 3
+        // 5, not 3. The GIF recorder keeps a frame alive on its own queue while
+        // it crops and encodes it, and that frame's IOSurface belongs to this
+        // pool; `latest` holds another. With only three surfaces, one held by
+        // the encoder and one by `latest` leaves ScreenCaptureKit a single
+        // buffer to render into, and it starts dropping frames — exactly while
+        // a clip is recording, which is the one time frames matter most.
+        cfg.queueDepth = 5
         // 20 fps: the newest frame is then at most 50 ms stale, which is well
         // inside "before the click", and an idle screen still costs nothing
         // because ScreenCaptureKit only sends frames when pixels change.

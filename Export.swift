@@ -119,19 +119,34 @@ enum Export {
 
     // MARK: HTML
 
+    /// `prepared` is GIFs an async doorway already encoded off the main
+    /// thread; without it, GIF steps are encoded here, synchronously, and the
+    /// document comes out the same.
     static func html(_ guide: Guide, embedImages: Bool = true,
-                     imageNames: [Int: String] = [:]) -> String {
+                     imageNames: [Int: String] = [:],
+                     prepared: PreparedGIFs? = nil) -> String {
         let theme = Settings.shared.exportTheme
         var body = ""
         for (i, step) in guide.steps.enumerated() {
             let n = i + 1
-            var src = ""
+            var media = ""
             if embedImages {
-                if let image = step.annotated(number: n), let data = Img.pngData(image) {
-                    src = "data:image/png;base64,\(data.base64EncodedString())"
+                let still = step.annotated(number: n).flatMap(Img.pngData)
+                let spec = step.renderSpec(number: n)
+                if spec.rendersAsGIF, let still,
+                   let gif = gifData(for: step, spec: spec, preset: .web, prepared: prepared) {
+                    // Reduced motion gets the still — the same annotated
+                    // screenshot the step would show as a screenshot step.
+                    media = "<picture><source media=\"(prefers-reduced-motion: reduce)\" "
+                        + "srcset=\"data:image/png;base64,\(still.base64EncodedString())\">"
+                        + "<img src=\"data:image/gif;base64,\(gif.base64EncodedString())\" "
+                        + "alt=\"Step \(n)\"></picture>"
+                } else if let still {
+                    media = "<img src=\"data:image/png;base64,\(still.base64EncodedString())\" "
+                        + "alt=\"Step \(n)\">"
                 }
-            } else {
-                src = "images/\(imageNames[n] ?? "")"
+            } else if let name = imageNames[n] {
+                media = "<img src=\"images/\(name)\" alt=\"Step \(n)\">"
             }
             let context = step.contextLine
             body += """
@@ -140,7 +155,7 @@ enum Export {
                     <div><p class="text">\(escape(step.displayText))</p>
                     \(context.isEmpty ? "" : "<p class=\"ctx\">\(escape(context))</p>")</div>
                   </div>
-                  \(src.isEmpty ? "" : "<img src=\"\(src)\" alt=\"Step \(n)\">")
+                  \(media)
                 </li>
 
                 """
@@ -182,6 +197,7 @@ enum Export {
           .ctx { margin: 3px 0 0; font-size: 12.5px; color: var(--muted); }
           img { display: block; width: 100%; height: auto; border-radius: 10px;
                 border: 1px solid var(--line); }
+          picture { display: block; }
           footer { color: var(--muted); font-size: 12px; margin-top: 40px; }
           .logo { display: block; height: 86px; width: auto; margin: 0 0 14px; }
           .bar { display: flex; height: 5px; border-radius: 3px; overflow: hidden;
@@ -253,21 +269,41 @@ enum Export {
     ///     beside it.** A 22 px circle next to a 22 px line box lines up on its
     ///     own; anything relying on a unitless line-height or `vertical-align`
     ///     drifts, because Gmail normalises those away.
-    static func emailHTML(_ guide: Guide) -> String {
+    ///
+    /// GIF steps go in as GIFs at `GifPreset.email` — 600 px, shown at 1×,
+    /// because an animated 2× asset is four times the bytes for a sharpness
+    /// nobody sees in motion. Two budgets keep a message sendable: one per GIF
+    /// (MediaPreparer returns nil past it) and one for the whole message. Past
+    /// either, the step falls back to its JPEG still with a one-line note, so
+    /// the reader knows there is more to see rather than thinking it is broken.
+    static func emailHTML(_ guide: Guide, prepared: PreparedGIFs? = nil) -> String {
         let theme = Settings.shared.exportTheme
         let ink = theme.inkHex, muted = theme.mutedHex
         let rule = theme.ruleHex, accent = theme.accentHex
         let family = "-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif"
         let base = "font-family:\(family);"
         let line = 22          // shared by the badge and the step text
+        let preset = emailGIFPreset
+        var embedded = 0       // image bytes so far, for the message budget
 
         var rows = ""
         for (i, step) in guide.steps.enumerated() {
             let n = i + 1
             let first = i == 0
+            let spec = step.renderSpec(number: n)
 
             var img = ""
-            if let full = step.annotated(number: n) {
+            if spec.rendersAsGIF, embedded < emailBudget.message,
+               let gif = gifData(for: step, spec: spec, preset: preset, prepared: prepared),
+               embedded + gif.count <= emailBudget.message,
+               let width = pixelWidth(of: gif) {
+                // 1×: the attribute IS the pixel width.
+                img = "<img width=\"\(width)\" alt=\"Step \(n)\" "
+                    + "src=\"data:image/gif;base64,\(gif.base64EncodedString())\" "
+                    + "style=\"display:block;width:100%;max-width:\(width)px;height:auto;"
+                    + "margin:12px 0 0;border:1px solid \(rule);border-radius:6px;\">"
+                embedded += gif.count
+            } else if let full = step.annotated(number: n) {
                 let sized = Img.downscale(full, maxEdge: emailImageWidth)
                 if let data = Img.jpegData(sized) {
                     // Half the pixel width, so a 2x asset displays at 1x.
@@ -276,6 +312,12 @@ enum Export {
                         + "src=\"data:image/jpeg;base64,\(data.base64EncodedString())\" "
                         + "style=\"display:block;width:100%;max-width:\(shown)px;height:auto;"
                         + "margin:12px 0 0;border:1px solid \(rule);border-radius:6px;\">"
+                    embedded += data.count
+                    if spec.rendersAsGIF {
+                        img += "<div style=\"\(base)font-size:12px;line-height:18px;"
+                            + "color:\(muted);padding-top:4px;\">"
+                            + "(animation in the web version)</div>"
+                    }
                 }
             }
 
@@ -357,7 +399,10 @@ enum Export {
     /// text fallback underneath for anywhere that will not take it.
     @discardableResult
     static func copyForEmail(_ guide: Guide) -> Int {
-        let html = emailHTML(guide)
+        putOnPasteboard(emailHTML(guide), guide: guide)
+    }
+
+    fileprivate static func putOnPasteboard(_ html: String, guide: Guide) -> Int {
         let board = NSPasteboard.general
         board.clearContents()
         board.setString(html, forType: .html)
@@ -365,19 +410,110 @@ enum Export {
         return html.utf8.count
     }
 
+    /// Per-GIF and whole-message byte budgets for the email. A `var` only so
+    /// the self-test can force the fallback; nothing else should change it.
+    struct EmailBudget: Equatable {
+        var perGIF: Int
+        var message: Int
+        static let standard = EmailBudget(perGIF: 1_500_000, message: 10_000_000)
+    }
+    static var emailBudget = EmailBudget.standard
+
+    static var emailGIFPreset: GifPreset {
+        var preset = GifPreset.email
+        preset.maxBytes = emailBudget.perGIF
+        return preset
+    }
+
+    // MARK: GIF media
+    //
+    // Every exporter asks `gifData` for a step's animation. Inside an async
+    // doorway the answer was encoded off the main thread beforehand; from the
+    // plain synchronous functions it is encoded right there. Either way the
+    // document is the same, which is what lets the self-tests use the
+    // synchronous versions.
+
+    /// GIFs encoded ahead of time, by step id rather than index: the user can
+    /// reorder or delete while an export is rendering.
+    struct PreparedGIFs: Sendable {
+        var data: [UUID: Data] = [:]
+        /// Attempted, whether or not it produced anything — nil for an
+        /// attempted step means "over budget", not "encode it now".
+        var tried: Set<UUID> = []
+    }
+
+    static func gifData(for step: GuideStep, spec: RenderSpec, preset: GifPreset,
+                        prepared: PreparedGIFs?) -> Data? {
+        if let prepared, prepared.tried.contains(step.id) { return prepared.data[step.id] }
+        return MediaPreparer.gif(spec, preset: preset)
+    }
+
+    /// Encodes every GIF step's animation off the main thread, two at a time
+    /// — each encode is already busy on its own, and a guide of ten GIFs all
+    /// at once would hold ten sets of full-size frames in memory. The specs
+    /// are value snapshots taken here, on the main actor.
+    static func prepareGIFs(_ guide: Guide, preset: GifPreset) async -> PreparedGIFs {
+        let jobs: [(id: UUID, spec: RenderSpec)] = guide.steps.enumerated().compactMap { i, step in
+            let spec = step.renderSpec(number: i + 1)
+            return spec.rendersAsGIF ? (step.id, spec) : nil
+        }
+        var out = PreparedGIFs()
+        out.tried = Set(jobs.map(\.id))
+        guard !jobs.isEmpty else { return out }
+        let started = Date()
+        out.data = await withTaskGroup(of: (UUID, Data?).self) { group in
+            var results: [UUID: Data] = [:]
+            var next = 0
+            while next < min(2, jobs.count) {
+                let job = jobs[next]
+                next += 1
+                group.addTask { (job.id, MediaPreparer.gif(job.spec, preset: preset)) }
+            }
+            for await (id, data) in group {
+                if let data { results[id] = data }
+                if next < jobs.count {
+                    let job = jobs[next]
+                    next += 1
+                    group.addTask { (job.id, MediaPreparer.gif(job.spec, preset: preset)) }
+                }
+            }
+            return results
+        }
+        Diag.log(String(format: "export: %d GIF(s) prepared in %.2f s, %d over budget",
+                        jobs.count, Date().timeIntervalSince(started),
+                        jobs.count - out.data.count))
+        return out
+    }
+
+    /// Width of the first frame, read from the header rather than decoded.
+    static func pixelWidth(of image: Data) -> Int? {
+        guard let source = CGImageSourceCreateWithData(image as CFData, nil),
+              let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any]
+        else { return nil }
+        return props[kCGImagePropertyPixelWidth] as? Int
+    }
+
     // MARK: Markdown
 
     /// Writes `<folder>/<name>.md` plus `<folder>/images/`. Markdown cannot
     /// carry its own pictures, so this export is a directory by necessity.
-    static func markdown(_ guide: Guide, to folder: URL) throws {
+    /// GIF steps are `step-NNN.gif`; every Markdown renderer that shows a PNG
+    /// animates a GIF.
+    static func markdown(_ guide: Guide, to folder: URL,
+                         prepared: PreparedGIFs? = nil) throws {
         let images = folder.appendingPathComponent("images", isDirectory: true)
         try FileManager.default.createDirectory(at: images, withIntermediateDirectories: true)
 
         var out = "# \(guide.title)\n\n"
         for (i, step) in guide.steps.enumerated() {
             let n = i + 1
-            let name = String(format: "step-%03d.png", n)
-            if let image = step.annotated(number: n) {
+            var name = String(format: "step-%03d.png", n)
+            let spec = step.renderSpec(number: n)
+            if spec.rendersAsGIF,
+               let gif = gifData(for: step, spec: spec, preset: .markdown, prepared: prepared) {
+                name = String(format: "step-%03d.gif", n)
+                try gif.write(to: images.appendingPathComponent(name))
+            } else if let image = step.annotated(number: n) {
                 _ = Img.writePNG(image, to: images.appendingPathComponent(name))
             }
             out += "## \(n). \(step.displayText)\n\n"
@@ -448,9 +584,22 @@ enum Export {
         let previous = NSGraphicsContext.current
         NSGraphicsContext.current = NSGraphicsContext(cgContext: ctx, flipped: false)
 
+        // Paper cannot animate, so a GIF step prints as a filmstrip of its key
+        // moments. Rendered once up front: the fixed layout can fall back to
+        // the flowing one, and neither should render them twice.
+        var strips: [UUID: [CGImage]] = [:]
+        for (i, step) in guide.steps.enumerated() {
+            let spec = step.renderSpec(number: i + 1)
+            guard spec.rendersAsGIF else { continue }
+            let frames = MediaPreparer.filmstrip(spec)
+            if !frames.isEmpty { strips[step.id] = frames }
+        }
+
         switch density {
-        case .fit:            drawFlowing(guide, in: ctx, content: content)
-        case .fixed(let n):   drawFixed(guide, in: ctx, content: content, perPage: max(1, n))
+        case .fit:
+            drawFlowing(guide, in: ctx, content: content, strips: strips)
+        case .fixed(let n):
+            drawFixed(guide, in: ctx, content: content, perPage: max(1, n), strips: strips)
         }
 
         // Order matters and a `defer` gets it wrong: `defer` runs *after* the
@@ -517,10 +666,14 @@ enum Export {
     /// The flowing layout stays left-aligned: there the image fills the column,
     /// there is no spare width, and centred body text is harder to read down a
     /// long page.
+    ///
+    /// `strip` is a GIF step's key frames; when present they replace the
+    /// screenshot, in the same box the screenshot would have had.
     private static func drawStep(_ step: GuideStep, number: Int,
                                  in rect: CGRect, ctx: CGContext,
                                  centred: Bool = false,
-                                 reservedTextHeight: CGFloat? = nil) {
+                                 reservedTextHeight: CGFloat? = nil,
+                                 strip: [CGImage]? = nil) {
         let textWidth = centred ? rect.width : rect.width - pdfIndent
         let textX = centred ? rect.minX : rect.minX + pdfIndent
         let body = bodyText(step, centred: centred)
@@ -563,8 +716,15 @@ enum Export {
         if let reservedTextHeight { pen = rect.maxY - reservedTextHeight }
 
         let available = pen - rect.minY
-        guard available > 24,
-              let shot = step.annotated(number: number)
+        guard available > 24 else { return }
+        if let strip, !strip.isEmpty {
+            drawFilmstrip(strip, top: pen,
+                          box: CGSize(width: textWidth, height: available),
+                          left: centred ? nil : rect.minX + pdfIndent,
+                          centreX: rect.midX, ctx: ctx)
+            return
+        }
+        guard let shot = step.annotated(number: number)
                   .flatMap({ Img.downscale($0, maxEdge: 1200) })
         else { return }
 
@@ -606,11 +766,125 @@ enum Export {
         let bodyH = measure(bodyText(step), width: textWidth)
         let subH = contextText(step).map { measure($0, width: textWidth) } ?? 0
         var imageH: CGFloat = 0
-        if let shot = step.annotated(number: number) {
-            imageH = textWidth * CGFloat(shot.height) / CGFloat(shot.width)
-            imageH = min(imageH, ceiling - bodyH - subH - 34)
+        let aspect = mediaAspect(step)
+        if aspect > 0 {
+            imageH = min(textWidth * aspect, ceiling - bodyH - subH - 34)
         }
         return bodyH + subH + imageH + 30
+    }
+
+    /// Height ÷ width of the picture a step will draw, without rendering it:
+    /// the still (after its crop), or for a GIF step the filmstrip block laid
+    /// out across a full column. 0 if the picture cannot be read.
+    ///
+    /// This used to be `annotated()` — a full redact-highlight-markup render —
+    /// called only to read two numbers off the result.
+    static func mediaAspect(_ step: GuideStep) -> CGFloat {
+        let spec = step.renderSpec(number: 1)
+        if spec.rendersAsGIF, let clip = spec.clip, let data = spec.clipData {
+            let frame = croppedAspect(data.pixelSize, crop: spec.crop)
+            guard frame > 0 else { return 0 }
+            let width: CGFloat = 612 - 104 - pdfIndent      // the flowing column
+            let layout = stripLayout(count: KeyFrames.pick(clip, data).count, aspect: frame,
+                                     in: CGSize(width: width, height: .greatestFiniteMagnitude))
+            return layout.size.width > 0 ? layout.size.height / layout.size.width : 0
+        }
+        guard let source = CGImageSourceCreateWithURL(spec.imageURL as CFURL, nil),
+              let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+              let w = props[kCGImagePropertyPixelWidth] as? Int,
+              let h = props[kCGImagePropertyPixelHeight] as? Int
+        else { return 0 }
+        return croppedAspect(CGSize(width: w, height: h), crop: spec.crop)
+    }
+
+    private static func croppedAspect(_ size: CGSize, crop: CGRect?) -> CGFloat {
+        let c = crop ?? CGRect(x: 0, y: 0, width: 1, height: 1)
+        let w = size.width * c.width, h = size.height * c.height
+        return w > 0 ? h / w : 0
+    }
+
+    // MARK: PDF — filmstrip
+
+    /// How a GIF step's key frames share the picture box.
+    struct StripLayout: Equatable {
+        var columns: Int
+        var rows: Int
+        var frame: CGSize
+        var gutter: CGFloat
+
+        var size: CGSize {
+            CGSize(width: frame.width * CGFloat(columns) + gutter * CGFloat(columns - 1),
+                   height: frame.height * CGFloat(rows) + gutter * CGFloat(rows - 1))
+        }
+    }
+
+    /// Room between frames in a row, which holds a "›".
+    private static let stripRowGutter: CGFloat = 14
+    private static let stripGridGutter: CGFloat = 6
+
+    /// One row, or two columns, whichever makes each frame bigger. A wide,
+    /// short box (three or four steps to a page) wants the row; the flowing
+    /// layout and one-per-page have height to spare, and there the grid's
+    /// frames come out about twice the size. Same arithmetic, in miniature,
+    /// as `columns(forPerPage:)`.
+    static func stripLayout(count: Int, aspect: CGFloat, in box: CGSize) -> StripLayout {
+        let n = max(count, 1)
+        func fit(columns: Int, rows: Int, gutter: CGFloat) -> StripLayout {
+            var w = (box.width - gutter * CGFloat(columns - 1)) / CGFloat(columns)
+            var h = w * aspect
+            let tallest = (box.height - gutter * CGFloat(rows - 1)) / CGFloat(rows)
+            if h > tallest { h = tallest; w = aspect > 0 ? h / aspect : 0 }
+            return StripLayout(columns: columns, rows: rows,
+                               frame: CGSize(width: max(w, 0), height: max(h, 0)),
+                               gutter: gutter)
+        }
+        let row = fit(columns: n, rows: 1, gutter: n > 1 ? stripRowGutter : 0)
+        guard n >= 3 else { return row }
+        let grid = fit(columns: 2, rows: (n + 1) / 2, gutter: stripGridGutter)
+        return grid.frame.width * grid.frame.height > row.frame.width * row.frame.height
+            ? grid : row
+    }
+
+    /// Draws the key frames into the box the screenshot would have had, top
+    /// edge at `top`. Left-aligned at `left`, or centred on `centreX` when
+    /// `left` is nil — the same rule the still follows.
+    ///
+    /// The row gets a "›" between frames to say "then". Not numbers: a
+    /// number beside a picture on this page already means a step.
+    private static func drawFilmstrip(_ frames: [CGImage], top: CGFloat, box: CGSize,
+                                      left: CGFloat?, centreX: CGFloat, ctx: CGContext) {
+        guard let first = frames.first, first.width > 0 else { return }
+        let aspect = CGFloat(first.height) / CGFloat(first.width)
+        let layout = stripLayout(count: frames.count, aspect: aspect, in: box)
+        let f = layout.frame
+        guard f.width > 4, f.height > 4 else { return }
+        let originX = left ?? centreX - layout.size.width / 2
+        let arrow = NSAttributedString(string: "›", attributes: [
+            .font: NSFont.systemFont(ofSize: 13, weight: .semibold),
+            .foregroundColor: pdfTheme.mutedNS,
+        ])
+        let arrowSize = arrow.size()
+
+        for (i, image) in frames.enumerated() {
+            let row = i / layout.columns, column = i % layout.columns
+            var x = originX + CGFloat(column) * (f.width + layout.gutter)
+            // An odd frame out on the last grid row sits in the middle of it.
+            let inRow = min(layout.columns, frames.count - row * layout.columns)
+            if layout.rows > 1, inRow < layout.columns {
+                x += CGFloat(layout.columns - inRow) * (f.width + layout.gutter) / 2
+            }
+            let y = top - CGFloat(row + 1) * f.height - CGFloat(row) * layout.gutter
+            let r = CGRect(x: x, y: y, width: f.width, height: f.height)
+            ctx.interpolationQuality = .high
+            ctx.draw(image, in: r)
+            ctx.setStrokeColor(pdfTheme.rule)
+            ctx.setLineWidth(0.5)
+            ctx.stroke(r)
+            if layout.rows == 1, i < frames.count - 1 {
+                arrow.draw(at: CGPoint(x: r.maxX + (layout.gutter - arrowSize.width) / 2,
+                                       y: r.midY - arrowSize.height / 2))
+            }
+        }
     }
 
     /// How tall the title block is, logo and stripe included.
@@ -703,7 +977,8 @@ enum Export {
 
     /// Flowing: each step takes the room it wants, and breaks to a new page
     /// rather than being split across one.
-    private static func drawFlowing(_ guide: Guide, in ctx: CGContext, content: CGRect) {
+    private static func drawFlowing(_ guide: Guide, in ctx: CGContext, content: CGRect,
+                                    strips: [UUID: [CGImage]] = [:]) {
         var pen = content.maxY
         var pageOpen = false
 
@@ -726,7 +1001,7 @@ enum Export {
             let slot = CGRect(x: content.minX, y: max(pen - wanted, content.minY),
                               width: content.width,
                               height: min(wanted, pen - content.minY))
-            drawStep(step, number: i + 1, in: slot, ctx: ctx)
+            drawStep(step, number: i + 1, in: slot, ctx: ctx, strip: strips[step.id])
             pen -= wanted
         }
 
@@ -759,7 +1034,8 @@ enum Export {
     }
 
     private static func drawFixed(_ guide: Guide, in ctx: CGContext,
-                                  content: CGRect, perPage: Int) {
+                                  content: CGRect, perPage: Int,
+                                  strips: [UUID: [CGImage]] = [:]) {
         // Same band on every page — page one holds the title block, later pages
         // a running head — so every slot on every page is the same size.
         let headerBand = max(62, headerHeight(guide, width: content.width))
@@ -776,7 +1052,7 @@ enum Export {
             // rather than emitting slivers.
             Diag.log("PDF: \(perPage) per page leaves \(Int(cellWidth))x\(Int(cellHeight)) pt "
                      + "per step — falling back to the flowing layout")
-            drawFlowing(guide, in: ctx, content: content)
+            drawFlowing(guide, in: ctx, content: content, strips: strips)
             return
         }
 
@@ -815,7 +1091,8 @@ enum Export {
                     let slot = CGRect(x: x, y: top - cellHeight,
                                       width: cellWidth, height: cellHeight)
                     drawStep(guide.steps[index], number: index + 1, in: slot, ctx: ctx,
-                             centred: true, reservedTextHeight: reserved)
+                             centred: true, reservedTextHeight: reserved,
+                             strip: strips[guide.steps[index].id])
                 }
             }
             ctx.endPDFPage()
@@ -839,12 +1116,31 @@ enum Export {
 // correct on their own (self-tests use them).
 // ─────────────────────────────────────────────────────────────────────────────
 
+//
+// Each one encodes the GIFs first (`prepareGIFs`: value snapshots taken here
+// on the main actor, encoded two at a time off it), then builds the document
+// on the main actor from what came back. The still screenshots are still
+// rendered on the main actor while building — one frame each, which is what
+// every export has always cost.
 extension Export {
-    static func htmlAsync(_ guide: Guide) async -> String { html(guide) }
-    static func emailHTMLAsync(_ guide: Guide) async -> String { emailHTML(guide) }
+    static func htmlAsync(_ guide: Guide) async -> String {
+        let gifs = await prepareGIFs(guide, preset: .web)
+        return html(guide, prepared: gifs)
+    }
+
+    static func emailHTMLAsync(_ guide: Guide) async -> String {
+        let gifs = await prepareGIFs(guide, preset: emailGIFPreset)
+        return emailHTML(guide, prepared: gifs)
+    }
+
     /// Returns the byte count put on the clipboard.
-    static func copyForEmailAsync(_ guide: Guide) async -> Int { copyForEmail(guide) }
+    static func copyForEmailAsync(_ guide: Guide) async -> Int {
+        let html = await emailHTMLAsync(guide)
+        return putOnPasteboard(html, guide: guide)
+    }
+
     static func markdownAsync(_ guide: Guide, to folder: URL) async throws {
-        try markdown(guide, to: folder)
+        let gifs = await prepareGIFs(guide, preset: .markdown)
+        try markdown(guide, to: folder, prepared: gifs)
     }
 }
