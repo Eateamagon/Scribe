@@ -534,7 +534,7 @@ extension AppDelegate {
 
     /// The frames every view actually ended up with, which is usually enough to
     /// name a layout bug without looking at a picture at all.
-    private func dumpLayout(_ window: NSWindow) {
+    func dumpLayout(_ window: NSWindow) {
         func walk(_ view: NSView, depth: Int) {
             let pad = String(repeating: "  ", count: depth)
             let f = view.frame
