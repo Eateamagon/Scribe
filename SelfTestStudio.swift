@@ -103,6 +103,23 @@ extension AppDelegate {
         }
         await studioSnapshot(window, named: "studio-gif.png")
 
+        // Playback: the timer runs, and frames rendered off the main thread
+        // arrive and move the playhead (it waits for a frame rather than
+        // skipping, so a broken renderer shows up here as no movement).
+        let before = editor.playTime
+        editor.togglePlayback()
+        await pause(1.3)
+        let wasPlaying = editor.isPlaying
+        let advanced = editor.playTime
+        editor.togglePlayback()
+        if let clip = gifStep.gif {
+            let moved = advanced >= before ? advanced - before
+                                           : (clip.trimEnd - before) + (advanced - clip.trimStart)
+            check(wasPlaying && moved >= 0.4,
+                  String(format: "playback advanced %.1f s of clip in 1.3 s", moved))
+        }
+        check(!editor.isPlaying, "pausing stops the timer")
+
         // 4. Media flip, through the segmented control's own action.
         editor.mediaControl.selectedSegment = 0
         editor.mediaControl.sendAction(editor.mediaControl.action, to: editor.mediaControl.target)
@@ -171,7 +188,51 @@ extension AppDelegate {
                   String(format: "picture centre maps to crop centre (%.3f, %.3f)", centre.x, centre.y))
         }
 
-        // 8. Expanded.
+        // 8. Spotlight, magnified, through the inspector. The canvas hit-tests
+        //    an inset it did not draw, so its idea of where the inset is has
+        //    to be where the renderer put it — checked on the rendered pixels,
+        //    uncropped and cropped.
+        editor.table.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
+        await pause(0.3)
+        editor.spotlightControl.selectedSegment = 2
+        editor.spotlightControl.sendAction(editor.spotlightControl.action, to: editor.spotlightControl.target)
+        await pause(0.4)
+        check(guide.steps[0].spotlight?.mode == .magnify && editor.canvas.mode == .spotlight,
+              "Magnify adds a spotlight and switches to the spotlight tool")
+        check(Self.insetFrameIsWhereTheCanvasThinks(guide.steps[0], number: 1),
+              "the magnifier's frame is drawn where the canvas hit-tests it (uncropped)")
+        check(editor.canvas.magnifierViewRect().map { editor.canvas.imageRect.contains($0) } ?? false,
+              "the magnifier sits inside the picture on the canvas")
+        await studioSnapshot(window, named: "studio-spotlight.png")
+        guide.setCrop(CGRect(x: 0.1, y: 0.2, width: 0.7, height: 0.7), at: 0)
+        await pause(0.3)
+        check(Self.insetFrameIsWhereTheCanvasThinks(guide.steps[0], number: 1),
+              "the magnifier's frame is drawn where the canvas hit-tests it (cropped)")
+        guide.setCrop(nil, at: 0)
+
+        // 9. The smallest the window goes, to catch anything that clips.
+        let size = window.frame.size
+        window.setFrame(NSRect(origin: window.frame.origin, size: window.minSize), display: true)
+        await pause(0.5)
+        await studioSnapshot(window, named: "studio-min.png")
+        window.setFrame(NSRect(origin: window.frame.origin, size: size), display: true)
+        await pause(0.3)
+
+        // 10. Edit ▸ Undo through the real responder chain. NSWindow answers
+        //     undo: itself, so this only reaches the annotations because of
+        //     EditorWindow; it must pop the newest thing (the cover) first.
+        window.makeFirstResponder(editor.table)
+        let undoItem = NSMenuItem(title: "Undo", action: Selector(("undo:")), keyEquivalent: "z")
+        check(window.validateMenuItem(undoItem), "Edit ▸ Undo is enabled with annotations on the step")
+        let covers = guide.steps[0].redactions.count, drawings = guide.steps[0].markups.count
+        let sent = NSApp.sendAction(Selector(("undo:")), to: nil, from: undoItem)
+        await pause(0.2)
+        check(sent && guide.steps[0].redactions.count == covers - 1 && guide.steps[0].markups.count == drawings,
+              "Edit ▸ Undo removed the newest annotation (the cover), not the arrow")
+
+        // 11. Expanded, on the GIF step.
+        editor.table.selectRowIndexes(IndexSet(integer: 2), byExtendingSelection: false)
+        await pause(0.3)
         editor.setExpanded(true)
         await pause(0.6)
         check(editor.table.enclosingScrollView?.superview?.isHidden == true, "Expand hides the step list")
@@ -185,8 +246,41 @@ extension AppDelegate {
         // Put the crop back so a later look at the folder is not confusing.
         guide.setCrop(nil, at: 2)
 
+        // 12. Delete from the list's own keyboard handling.
+        editor.table.selectRowIndexes(IndexSet(integer: 1), byExtendingSelection: false)
+        window.makeFirstResponder(editor.table)
+        let doomed = guide.steps[1].id
+        if let delete = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [],
+                                         timestamp: 0, windowNumber: window.windowNumber, context: nil,
+                                         characters: "\u{7f}", charactersIgnoringModifiers: "\u{7f}",
+                                         isARepeat: false, keyCode: 51) {
+            editor.table.keyDown(with: delete)
+        }
+        await pause(0.3)
+        check(guide.count == 2 && !guide.steps.contains { $0.id == doomed } && editor.table.selectedRow == 1,
+              "Delete removed the selected step and selected its neighbour")
+
         Diag.log(failures.isEmpty ? "SHOT-STUDIO PASSED — \(guide.folder.path)"
                                   : "SHOT-STUDIO FAILED: \(failures.joined(separator: "; "))")
+    }
+
+    /// Samples the rendered still on the inset's accent-coloured frame, which
+    /// `FrameRenderer.magnify` strokes margin/5 outside the inset itself.
+    private static func insetFrameIsWhereTheCanvasThinks(_ step: GuideStep, number: Int) -> Bool {
+        guard let spotlight = step.spotlight,
+              let still = FrameRenderer.still(step.renderSpec(number: number)),
+              let n = MarkupCanvas.magnifierRect(spotlight, crop: step.crop,
+                                                 outputSize: CGSize(width: still.width, height: still.height))
+        else { return false }
+        let w = CGFloat(still.width), h = CGFloat(still.height)
+        let margin = max(w, h) / 60
+        let left = CGPoint(x: (n.minX * w - margin / 5) / w, y: n.midY)
+        let top = CGPoint(x: n.midX, y: (n.minY * h - margin / 5) / h)
+        func isAccent(_ p: CGPoint) -> Bool {
+            guard let px = Img.sample(still, at: p) else { return false }
+            return px.r > 190 && px.g < 110 && px.b < 150
+        }
+        return isAccent(left) && isAccent(top)
     }
 
     private static func studioDescendants(of view: NSView) -> [NSView] {

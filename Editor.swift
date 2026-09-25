@@ -1217,8 +1217,9 @@ final class SwatchView: NSView {
         let dot = bounds.insetBy(dx: 4, dy: 4)
         swatch.nsColor.withAlphaComponent(alpha).setFill()
         NSBezierPath(ovalIn: dot).fill()
-        // A faint rim, or the white swatch vanishes on a light bar.
-        NSColor.black.withAlphaComponent(0.22 * alpha).setStroke()
+        // A faint rim in the text colour, or the white swatch vanishes on a
+        // light bar and the black one on a dark bar.
+        NSColor.labelColor.withAlphaComponent(0.35 * alpha).setStroke()
         let rim = NSBezierPath(ovalIn: dot.insetBy(dx: 0.25, dy: 0.25))
         rim.lineWidth = 0.5
         rim.stroke()
@@ -1498,7 +1499,7 @@ final class EditorWindowController: NSWindowController,
                                          target: nil, action: nil)
     private var cropButton = NSButton()
     private var resetCropButton = NSButton()
-    private let spotlightControl = NSSegmentedControl()
+    let spotlightControl = NSSegmentedControl()
     private let zoomSlider = NSSlider()
     private let zoomValue = NSTextField(labelWithString: "")
     private var replaceButton = NSPopUpButton()
@@ -1634,7 +1635,8 @@ final class EditorWindowController: NSWindowController,
         split.dividerStyle = .thin
         split.delegate = self
         [listPane, centrePane, inspectorPane].forEach(split.addArrangedSubview)
-        // The centre gives way first when the window is resized; the side
+        // The centre gives way first when the window is resized (see also
+        // `shouldAdjustSizeOfSubview`, which is what actually holds); the side
         // panes keep the width you gave them.
         split.setHoldingPriority(NSLayoutConstraint.Priority(260), forSubviewAt: 0)
         split.setHoldingPriority(NSLayoutConstraint.Priority(240), forSubviewAt: 1)
@@ -1847,8 +1849,14 @@ final class EditorWindowController: NSWindowController,
             column.bottomAnchor.constraint(equalTo: pane.bottomAnchor),
             column.leadingAnchor.constraint(equalTo: pane.leadingAnchor),
             column.trailingAnchor.constraint(equalTo: pane.trailingAnchor),
-            pane.widthAnchor.constraint(greaterThanOrEqualToConstant: 460),
         ])
+        // Not required: the split delegate keeps the centre at least this
+        // wide, and if the window ever forces it narrower the strip clips
+        // rather than the layout breaking.
+        let minimum = pane.widthAnchor.constraint(greaterThanOrEqualToConstant: Self.centreMinimum)
+        minimum.priority = .defaultHigh
+        minimum.isActive = true
+        pane.clipsToBounds = true
         for view in [strip, stripRule, stage, transport, captionRow] {
             view.widthAnchor.constraint(equalTo: column.widthAnchor).isActive = true
         }
@@ -2049,7 +2057,7 @@ final class EditorWindowController: NSWindowController,
         hint.font = .systemFont(ofSize: 11)
         hint.textColor = .tertiaryLabelColor
         hint.alignment = .right
-        hint.lineBreakMode = .byTruncatingHead
+        hint.lineBreakMode = .byTruncatingTail
         hint.setContentCompressionResistancePriority(.init(100), for: .horizontal)
 
         let row = NSStackView(views: [previousButton, nextButton, caption, NSView(), hint])
@@ -2430,21 +2438,44 @@ final class EditorWindowController: NSWindowController,
                           ofDividerAt: 1)
     }
 
+    private static let listRange: ClosedRange<CGFloat> = 230...380
+    private static let inspectorRange: ClosedRange<CGFloat> = 260...400
+    private static let centreMinimum: CGFloat = 460
+
     /// While expanded both side panes are hidden (a hidden arranged subview
     /// is a collapsed one), and the limits have to yield — a delegate still
-    /// insisting on 200 pt is what made `setPosition(0, …)` do nothing.
+    /// insisting on a minimum is what made `setPosition(0, …)` do nothing.
+    /// Otherwise each side pane stays in its range and the centre always
+    /// keeps room for the tool strip.
     func splitView(_ splitView: NSSplitView,
                    constrainMinCoordinate proposed: CGFloat,
                    ofSubviewAt index: Int) -> CGFloat {
         if isExpanded { return proposed }
-        return index == 0 ? 200 : splitView.frame.width - 380
+        let width = splitView.frame.width
+        if index == 0 { return Self.listRange.lowerBound }
+        let listEdge = listPane.isHidden ? 0 : listPane.frame.maxX
+        return max(width - Self.inspectorRange.upperBound, listEdge + Self.centreMinimum)
     }
 
     func splitView(_ splitView: NSSplitView,
                    constrainMaxCoordinate proposed: CGFloat,
                    ofSubviewAt index: Int) -> CGFloat {
         if isExpanded { return proposed }
-        return index == 0 ? 360 : splitView.frame.width - 250
+        let width = splitView.frame.width
+        if index == 0 {
+            let inspector = inspectorPane.isHidden ? 0 : inspectorPane.frame.width + splitView.dividerThickness
+            return max(min(Self.listRange.upperBound, width - inspector - Self.centreMinimum),
+                       Self.listRange.lowerBound)
+        }
+        return width - Self.inspectorRange.lowerBound
+    }
+
+    /// Implementing the constrain methods above puts NSSplitView on its older
+    /// resizing path, which ignores holding priorities and shrinks all three
+    /// panes in proportion — at the minimum window size that squeezed the step
+    /// list until its text broke mid-word. Only the centre follows the window.
+    func splitView(_ splitView: NSSplitView, shouldAdjustSizeOfSubview view: NSView) -> Bool {
+        view === centrePane
     }
 
     func splitView(_ splitView: NSSplitView, canCollapseSubview subview: NSView) -> Bool {
@@ -2628,7 +2659,10 @@ final class EditorWindowController: NSWindowController,
             if isEditingNote { commitNote(); window?.makeFirstResponder(table) }
             noteStepID = step.id
             noteView.string = step.note
-            noteView.undoManager?.removeAllActions(withTarget: noteView.textStorage as Any)
+            // The text view types into the window's undo manager. Its history
+            // belongs to the step it was typed for; ⌘Z must not replay the
+            // last step's sentence into this one.
+            window?.undoManager?.removeAllActions()
         } else if !isEditingNote, noteView.string != step.note {
             noteView.string = step.note
         }
@@ -2835,9 +2869,11 @@ final class EditorWindowController: NSWindowController,
 
     // MARK: Playback
 
-    @objc private func togglePlayback() {
+    @objc func togglePlayback() {
         if playTimer != nil { pause() } else { play() }
     }
+
+    var isPlaying: Bool { playTimer != nil }
 
     private func play() {
         guard let step = currentStep, step.isGIF, let clip = step.gif, canvas.mode != .crop else { return }
@@ -3665,12 +3701,17 @@ final class EditorWindowController: NSWindowController,
                 Settings.shared.pdfDensity = density
                 self.beginBusy("Rendering PDF (\(density.label))…")
                 Export.pdf(self.guide, to: url, density: density) { error in
-                    MainActor.assumeIsolated {
-                        self.endBusy()
-                        if let error {
-                            self.report("PDF export failed: \(error.localizedDescription)")
-                        } else {
-                            self.finishExport(at: url)
+                    // Hop explicitly: the completion may arrive off the main
+                    // thread once GIF filmstrips render in the background.
+                    let failure = error?.localizedDescription
+                    DispatchQueue.main.async {
+                        MainActor.assumeIsolated {
+                            self.endBusy()
+                            if let failure {
+                                self.report("PDF export failed: \(failure)")
+                            } else {
+                                self.finishExport(at: url)
+                            }
                         }
                     }
                 }
