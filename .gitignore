@@ -8,3 +8,4 @@ editor-erased.png
 *.png.tmp
 .testdata/
 .claude/
+studio-*.png
