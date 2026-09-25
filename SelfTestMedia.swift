@@ -137,6 +137,27 @@ extension AppDelegate {
             + "ImageIO \(imageIO?.count ?? -1) bytes")
         check((custom?.count ?? .max) < (imageIO?.count ?? 0), "(c) custom encoder not smaller")
 
+        // (c) Screen-like footage: text-heavy UI, typing, a menu opening, and
+        // the capture's JPEG noise — the case the encoder is built for.
+        let ui: [(image: CGImage, delay: Double)] = (0..<30).compactMap { i in
+            Self.uiFrame(i).map { (image: $0, delay: 0.1) }
+        }
+        let uiCustom = GifEncoder.encode(ui)
+        let uiImageIO = GifEncoder.encodeImageIO(ui)
+        let uiDecoded = Self.decodeGIF(uiCustom ?? Data())
+        let uiDiff = uiDecoded.frames.last.flatMap { last in ui.last.map { Self.difference(last, $0.image) } }
+        log(String(format: "(c) UI fixture, 30 frames 1200x750: custom %d bytes, ImageIO %d bytes "
+                   + "(%.0f%%); last frame mean |Δ| %.2f", uiCustom?.count ?? -1, uiImageIO?.count ?? -1,
+                   Double(uiCustom?.count ?? 0) * 100 / Double(max(uiImageIO?.count ?? 1, 1)),
+                   uiDiff?.mean ?? -1))
+        check((uiCustom?.count ?? .max) < (uiImageIO?.count ?? 0), "(c) custom not smaller on UI footage")
+        check(uiDecoded.frames.count > 1 && (uiDiff?.mean ?? 99) < 3, "(c) UI fixture decodes wrong")
+        if let gifData = uiCustom { try? gifData.write(to: folder.appendingPathComponent("ui-fixture.gif")) }
+        if let gifData = uiImageIO {
+            try? gifData.write(to: folder.appendingPathComponent("ui-fixture-imageio.gif"))
+        }
+        write(uiDecoded.frames.count > 15 ? uiDecoded.frames[15] : nil, "ui-fixture-decoded-16.png")
+
         // (a) Encoder bookkeeping on hand-made frames: identical neighbours
         // merge, 0.125 s delays carry their rounding and still add up to
         // exactly 1 s, and the forced colours are exact palette entries.
@@ -379,6 +400,97 @@ extension AppDelegate {
     }
 
     // MARK: Helpers
+
+    /// Frame `i` of a made-up app window: sidebar, a page of text, a search
+    /// field being typed into with a blinking caret, and a menu open for
+    /// frames 12–21 with its highlight walking down. Round-tripped through
+    /// JPEG at the capture quality, because real footage arrives with that
+    /// noise and it is what an encoder has to cope with.
+    nonisolated private static func uiFrame(_ i: Int) -> CGImage? {
+        let w = 1200, h = 750
+        guard let ctx = Img.bitmap(width: w, height: h) else { return nil }
+        let H = CGFloat(h)
+        func rgb(_ r: CGFloat, _ g: CGFloat, _ b: CGFloat) -> CGColor {
+            CGColor(red: r, green: g, blue: b, alpha: 1)
+        }
+        func text(_ s: String, _ x: CGFloat, _ top: CGFloat, _ size: CGFloat, _ color: CGColor,
+                  bold: Bool = false) {
+            let line = Annotator.TextLine(s, size: size, weight: bold ? Annotator.TextLine.semibold : 0,
+                                          color: color)
+            line.draw(in: ctx, baseline: CGPoint(x: x, y: H - top - line.ascent))
+        }
+        func fill(_ r: CGRect, _ c: CGColor, radius: CGFloat = 0) {
+            ctx.setFillColor(c)
+            let flipped = CGRect(x: r.minX, y: H - r.maxY, width: r.width, height: r.height)
+            ctx.addPath(CGPath(roundedRect: flipped, cornerWidth: radius, cornerHeight: radius,
+                               transform: nil))
+            ctx.fillPath()
+        }
+        fill(CGRect(x: 0, y: 0, width: w, height: h), rgb(0.99, 0.99, 0.99))
+        fill(CGRect(x: 0, y: 0, width: w, height: 44), rgb(0.92, 0.92, 0.93))
+        fill(CGRect(x: 0, y: 44, width: 240, height: h - 44), rgb(0.94, 0.95, 0.97))
+        for (n, c) in [rgb(1, 0.37, 0.34), rgb(1, 0.74, 0.18), rgb(0.16, 0.78, 0.25)].enumerated() {
+            ctx.setFillColor(c)
+            ctx.fillEllipse(in: CGRect(x: 16 + CGFloat(n) * 20, y: H - 29, width: 13, height: 13))
+        }
+        text("Gradebook — Period 3", 520, 13, 15, rgb(0.2, 0.2, 0.22), bold: true)
+        let sections = ["Dashboard", "Courses", "Assignments", "Grades", "Attendance", "Messages",
+                        "Calendar", "Files", "Rubrics", "Reports", "Settings", "Help"]
+        for (n, s) in sections.enumerated() {
+            let top = 64 + CGFloat(n) * 34
+            if n == 3 {
+                fill(CGRect(x: 10, y: top - 6, width: 220, height: 30), rgb(0.16, 0.51, 0.96), radius: 6)
+                text(s, 24, top, 15, rgb(1, 1, 1), bold: true)
+            } else {
+                text(s, 24, top, 15, rgb(0.25, 0.26, 0.3))
+            }
+        }
+        fill(CGRect(x: 270, y: 60, width: 420, height: 32), rgb(1, 1, 1), radius: 7)
+        ctx.setStrokeColor(rgb(0.78, 0.79, 0.82))
+        ctx.setLineWidth(1)
+        ctx.stroke(CGRect(x: 270.5, y: H - 92.5, width: 420, height: 32))
+        let typed = String("Students with missing work this week".prefix(i + 3))
+        text(typed, 282, 67, 15, rgb(0.1, 0.1, 0.12))
+        if i % 6 < 3 {
+            let caretX = 282 + Annotator.TextLine(typed, size: 15, weight: 0, color: rgb(0, 0, 0)).width + 1
+            fill(CGRect(x: caretX, y: 66, width: 1.5, height: 20), rgb(0.1, 0.1, 0.12))
+        }
+        let words = ["Essay draft", "Lab report", "Quiz 4", "Reading log", "Project outline",
+                     "Worksheet 7", "Peer review", "Unit test", "Journal", "Vocabulary"]
+        for row in 0..<17 {
+            let top = 116 + CGFloat(row) * 36
+            fill(CGRect(x: 270, y: top + 29, width: 900, height: 1), rgb(0.9, 0.9, 0.92))
+            text("Student \(row + 1)", 282, top + 6, 14, rgb(0.15, 0.15, 0.18), bold: true)
+            text(words[row % words.count], 470, top + 6, 14, rgb(0.3, 0.31, 0.35))
+            text("\(60 + (row * 7) % 40)%", 700, top + 6, 14,
+                 row % 5 == 2 ? rgb(0.85, 0.2, 0.2) : rgb(0.3, 0.31, 0.35))
+            text(row % 3 == 0 ? "Missing" : "Submitted Sep \(10 + row)", 820, top + 6, 14,
+                 rgb(0.45, 0.46, 0.5))
+        }
+        if (12..<22).contains(i) {
+            let menu = CGRect(x: 760, y: 100, width: 260, height: 232)
+            ctx.saveGState()
+            ctx.setShadow(offset: CGSize(width: 0, height: -6), blur: 18,
+                          color: CGColor(red: 0, green: 0, blue: 0, alpha: 0.28))
+            fill(menu, rgb(0.97, 0.97, 0.98), radius: 8)
+            ctx.restoreGState()
+            let items = ["Export grades…", "Print roster", "Message guardians", "Mark as reviewed",
+                         "Hide column", "Sort by name", "Sort by score"]
+            let highlighted = (i - 12) / 2
+            for (n, s) in items.enumerated() {
+                let top = menu.minY + 8 + CGFloat(n) * 31
+                if n == highlighted {
+                    fill(CGRect(x: menu.minX + 6, y: top, width: menu.width - 12, height: 28),
+                         rgb(0.16, 0.51, 0.96), radius: 5)
+                }
+                text(s, menu.minX + 18, top + 5, 14, n == highlighted ? rgb(1, 1, 1) : rgb(0.12, 0.12, 0.14))
+            }
+        }
+        guard let clean = ctx.makeImage(), let jpeg = Img.jpegData(clean, quality: 0.85),
+              let src = CGImageSourceCreateWithData(jpeg as CFData, nil)
+        else { return nil }
+        return CGImageSourceCreateImageAtIndex(src, 0, nil)
+    }
 
     /// A colour as it comes out of the renderers' DeviceRGB bitmaps.
     nonisolated private static func renderedColor(_ color: CGColor) -> (r: Int, g: Int, b: Int) {
