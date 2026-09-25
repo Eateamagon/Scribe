@@ -121,8 +121,12 @@ extension AppDelegate {
             write(last, "gif-decoded-last.png")
         }
 
-        log(String(format: "(j) web gif: %.1f ms/frame render (%d frames), %.0f ms encode, %.0f ms wall",
-                   report.renderSeconds * 1000 / Double(max(report.rendered, 1)), report.rendered,
+        let single = Date()
+        for i in 0..<10 { _ = FrameRenderer.frame(spec, at: 0.5 + Double(i) * 0.2, maxEdge: 1200) }
+        let perFrame = Date().timeIntervalSince(single) * 100
+        log(String(format: "(j) web gif: %.1f ms per frame on one thread; in the pipeline %d frames "
+                   + "rendered in %.0f ms (all cores, incl. palette thumbnails), %.0f ms encode, "
+                   + "%.0f ms wall", perFrame, report.rendered, report.renderSeconds * 1000,
                    report.encodeSeconds * 1000, wall * 1000))
 
         // (c) Same frames through both encoders.
@@ -132,6 +136,37 @@ extension AppDelegate {
         log("(c) \(frames.count) frames: custom \(custom?.count ?? -1) bytes, "
             + "ImageIO \(imageIO?.count ?? -1) bytes")
         check((custom?.count ?? .max) < (imageIO?.count ?? 0), "(c) custom encoder not smaller")
+
+        // (a) Encoder bookkeeping on hand-made frames: identical neighbours
+        // merge, 0.125 s delays carry their rounding and still add up to
+        // exactly 1 s, and the forced colours are exact palette entries.
+        let solids = [MarkupColor.white, .blue, .green, .orange].map { color -> CGImage? in
+            guard let ctx = Img.bitmap(width: 64, height: 40) else { return nil }
+            ctx.setFillColor(color.cgColor)
+            ctx.fill(CGRect(x: 0, y: 0, width: 64, height: 40))
+            ctx.setFillColor(Annotator.accent)
+            ctx.fill(CGRect(x: 8, y: 8, width: 12, height: 12))
+            return ctx.makeImage()
+        }.compactMap { $0 }
+        if solids.count == 4 {
+            let sequence = [0, 0, 1, 2, 2, 2, 3, 0].map { (image: solids[$0], delay: 0.125) }
+            let merged = GifEncoder.encode(sequence).map(Self.decodeGIF)
+            let cs = merged?.delays.map { Int(($0 * 100).rounded()) } ?? []
+            let table = GifEncoder.encode(sequence).map { [UInt8]($0.prefix(13 + 768).dropFirst(13)) } ?? []
+            let exact = GifEncoder.Palette.builtIn.allSatisfy { c in
+                stride(from: 0, to: table.count, by: 3).contains {
+                    table[$0] == c.r && table[$0 + 1] == c.g && table[$0 + 2] == c.b
+                }
+            }
+            log("(a) 8 frames with 3 repeats -> \(merged?.frames.count ?? -1) frames, delays \(cs) cs; "
+                + "forced colours exact in palette: \(exact)")
+            check(merged?.frames.count == 5 && cs == [25, 13, 37, 13, 12], "(a) merge / carried delays")
+            check(exact, "(a) forced colours missing from the palette")
+            let quick = GifEncoder.encode([(solids[0], 0.004), (solids[1], 0.004)]).map(Self.decodeGIF)
+            check(quick?.delays.map { Int(($0 * 100).rounded()) } == [2, 2], "(a) 2 cs floor")
+        } else {
+            check(false, "(a) solid fixtures")
+        }
 
         // (j) The performance target: 40 distinct 1200×750 frames.
         let forty: [(image: CGImage, delay: Double)] = (0..<40).compactMap { i in

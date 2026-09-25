@@ -317,7 +317,14 @@ enum FrameRenderer {
         guard let maxEdge, let size = Img.pixelSize(of: url) else { return Img.readPNG(url) }
         let scale = sourceScale(size, spec: spec, maxEdge: maxEdge, applyCrop: applyCrop)
         guard scale < 1 else { return Img.readPNG(url) }
-        return Img.read(url, longestEdge: max(size.width, size.height) * scale)
+        let longest = max(size.width, size.height) * scale
+        // JPEG only decodes cheaply at 1/2, 1/4, 1/8 — measured on a
+        // 1600 px frame, 600 px comes straight out in 4 ms against 8 ms for
+        // decode-then-shrink, while 1200 px is no faster that way (15 ms
+        // either way; the full decode is the cost). So the direct route only
+        // when it can skip work.
+        if scale <= 0.5 { return Img.read(url, longestEdge: longest) }
+        return Img.readPNG(url).map { Img.downscale($0, maxEdge: longest) }
     }
 
     /// `time == nil` renders the still (highlight); otherwise a GIF frame
@@ -698,9 +705,14 @@ enum GifEncoder {
               let raster = Raster(width: first.image.width, height: first.image.height)
         else { return nil }
         let histogram = Histogram()
-        for i in Histogram.sampleIndices(count: frames.count) {
-            raster.draw(frames[i].image)
-            histogram.add(raster)
+        let samples = Set(Histogram.sampleIndices(count: frames.count))
+        for (i, frame) in frames.enumerated() {
+            if samples.contains(i) {
+                raster.draw(frame.image)
+                histogram.add(raster)
+            } else {
+                histogram.addCoverage(frame.image, fullPixels: raster.count)
+            }
         }
         let palette = Palette(histogram, forcing: extra)
         guard let writer = Writer(width: first.image.width, height: first.image.height,
@@ -825,16 +837,39 @@ enum GifEncoder {
             return picks
         }
 
-        func add(_ raster: Raster) {
+        /// Longest edge of the coverage pass over the frames `sampleIndices`
+        /// skips.
+        static let coverageEdge: CGFloat = 240
+        private var coverage: Raster?
+
+        func add(_ raster: Raster, weight: Int = 1) {
             let pixels = raster.pixels, counts = self.counts, sums = self.sums
             for i in 0..<raster.count {
                 let p = pixels[i]
                 let k = Raster.key(p)
-                counts[k] += 1
-                sums[k * 3] += Int(p & 0xFF)
-                sums[k * 3 + 1] += Int((p >> 8) & 0xFF)
-                sums[k * 3 + 2] += Int((p >> 16) & 0xFF)
+                counts[k] += weight
+                sums[k * 3] += Int(p & 0xFF) * weight
+                sums[k * 3 + 1] += Int((p >> 8) & 0xFF) * weight
+                sums[k * 3 + 2] += Int((p >> 16) & 0xFF) * weight
             }
+        }
+
+        /// Adds a frame the full-size sample skipped, shrunk to
+        /// `coverageEdge`. It is there for its *colours*: a menu open for
+        /// three frames between two samples would otherwise get no palette
+        /// entry at all and come out in the nearest wrong colour. Each small
+        /// pixel is weighted by the area it stands for, so every frame counts
+        /// once whichever way it was sampled.
+        func addCoverage(_ image: CGImage, fullPixels: Int) {
+            let w = CGFloat(image.width), h = CGFloat(image.height)
+            let scale = min(1, Histogram.coverageEdge / max(w, h, 1))
+            let sw = max(Int((w * scale).rounded()), 1), sh = max(Int((h * scale).rounded()), 1)
+            if coverage?.width != sw || coverage?.height != sh {
+                coverage = Raster(width: sw, height: sh)
+            }
+            guard let raster = coverage else { return }
+            raster.draw(image)
+            add(raster, weight: max(1, Int((Double(fullPixels) / Double(raster.count)).rounded())))
         }
     }
 
@@ -1447,12 +1482,9 @@ enum MediaPreparer {
     /// The planned frames, rendered. For measuring and for the ImageIO
     /// baseline; `gif` itself streams instead of holding them all.
     static func renderFrames(_ spec: RenderSpec, preset: GifPreset) -> [(image: CGImage, delay: Double)] {
-        let cache = StaticPassCache()
-        return plan(spec, fps: preset.fps).compactMap { planned in
-            FrameRenderer.frame(spec, at: planned.time, maxEdge: preset.maxEdge,
-                                applyCrop: true, cache: cache)
-                .map { (image: $0, delay: planned.delay) }
-        }
+        let frames = plan(spec, fps: preset.fps)
+        let images = renderConcurrently(spec, frames, Array(frames.indices), maxEdge: preset.maxEdge)
+        return frames.indices.compactMap { i in images[i].map { (image: $0, delay: frames[i].delay) } }
     }
 
     /// Colours a step's own covers and drawings use — given exact palette
@@ -1464,59 +1496,108 @@ enum MediaPreparer {
     }
 
     /// One rung of the ladder: palette from a sample of the planned frames
-    /// (kept, so they are not rendered twice), then every frame streamed
-    /// through the writer. Gives up as soon as the output passes `budget`.
+    /// (kept, so they are not rendered twice) plus a thumbnail pass over the
+    /// rest, then every frame streamed through the writer in batches. Gives
+    /// up as soon as the output passes `budget`.
     private static func encode(_ spec: RenderSpec, preset: GifPreset, budget: Int?,
                                report: inout GifReport) -> Data? {
         let frames = plan(spec, fps: preset.fps)
         report.planned = frames.count
         guard !frames.isEmpty else { return nil }
-        let cache = StaticPassCache()
         var renderTime = 0.0
-        func render(_ f: PlannedFrame) -> CGImage? {
+        func render(_ indices: [Int], maxEdge: CGFloat) -> [Int: CGImage] {
             let started = Date()
             defer { renderTime += Date().timeIntervalSince(started) }
-            report.rendered += 1
-            return FrameRenderer.frame(spec, at: f.time, maxEdge: preset.maxEdge,
-                                       applyCrop: true, cache: cache)
+            return renderConcurrently(spec, frames, indices, maxEdge: maxEdge)
         }
 
-        var sampled: [Int: CGImage] = [:]
-        for i in GifEncoder.Histogram.sampleIndices(count: frames.count) {
-            if let image = render(frames[i]) { sampled[i] = image }
-        }
+        let sampleIndices = GifEncoder.Histogram.sampleIndices(count: frames.count)
+        var sampled = render(sampleIndices, maxEdge: preset.maxEdge)
+        report.rendered += sampled.count
         guard let first = sampled[0] ?? sampled.values.first,
               let raster = GifEncoder.Raster(width: first.width, height: first.height)
         else { return nil }
+        // Every other frame at thumbnail size, for colours the full-size
+        // sample would miss; see `Histogram.addCoverage`.
+        let rest = frames.indices.filter { sampled[$0] == nil }
+        let thumbnails = render(rest, maxEdge: GifEncoder.Histogram.coverageEdge)
+
         let encodeStarted = Date()
-        var encodeTime = 0.0
         let histogram = GifEncoder.Histogram()
-        for image in sampled.values { raster.draw(image); histogram.add(raster) }
+        for i in rest { if let image = thumbnails[i] { histogram.addCoverage(image, fullPixels: raster.count) } }
+        for i in sampleIndices { if let image = sampled[i] { raster.draw(image); histogram.add(raster) } }
         let palette = GifEncoder.Palette(histogram, forcing: specColors(spec))
         guard let writer = GifEncoder.Writer(width: first.width, height: first.height,
                                              palette: palette)
         else { return nil }
-        encodeTime += Date().timeIntervalSince(encodeStarted)
+        var encodeTime = Date().timeIntervalSince(encodeStarted)
+        func finishReport() {
+            report.written = writer.framesWritten
+            report.renderSeconds += renderTime
+            report.encodeSeconds += encodeTime
+        }
 
-        for (i, planned) in frames.enumerated() {
-            guard let image = sampled.removeValue(forKey: i) ?? render(planned) else { continue }
-            let started = Date()
-            writer.add(image, delay: planned.delay)
-            encodeTime += Date().timeIntervalSince(started)
-            if let budget, writer.byteCount > budget {
-                report.renderSeconds += renderTime
-                report.encodeSeconds += encodeTime
-                return nil
+        // Batches of a few frames per core: parallel rendering, bounded
+        // memory, and the writer still sees frames strictly in order.
+        let batch = max(4, ProcessInfo.processInfo.activeProcessorCount * 2)
+        var start = 0
+        while start < frames.count {
+            let range = start..<min(start + batch, frames.count)
+            let rendered = render(range.filter { sampled[$0] == nil }, maxEdge: preset.maxEdge)
+            report.rendered += rendered.count
+            for i in range {
+                guard let image = sampled.removeValue(forKey: i) ?? rendered[i] else { continue }
+                let started = Date()
+                writer.add(image, delay: frames[i].delay)
+                encodeTime += Date().timeIntervalSince(started)
+                if let budget, writer.byteCount > budget {
+                    finishReport()
+                    return nil
+                }
             }
+            start = range.upperBound
         }
         let started = Date()
         let data = writer.finish()
         encodeTime += Date().timeIntervalSince(started)
-        report.written = writer.framesWritten
-        report.renderSeconds += renderTime
-        report.encodeSeconds += encodeTime
+        finishReport()
         if let budget, data.count > budget { return nil }
         return data
+    }
+
+    /// Renders `indices` of `frames` across all cores. Consecutive frames of
+    /// the same source go to one worker, so they share its static-pass cache
+    /// — a pointer moving over a still screen is one decode, not one each.
+    static func renderConcurrently(_ spec: RenderSpec, _ frames: [PlannedFrame], _ indices: [Int],
+                                   maxEdge: CGFloat) -> [Int: CGImage] {
+        guard !indices.isEmpty else { return [:] }
+        var groups: [[Int]] = []
+        for i in indices {
+            if let last = groups.last?.last, last == i - 1, frames[last].source == frames[i].source {
+                groups[groups.count - 1].append(i)
+            } else {
+                groups.append([i])
+            }
+        }
+        let slots = UnsafeMutableBufferPointer<CGImage?>.allocate(capacity: indices.count)
+        slots.initialize(repeating: nil)
+        defer { slots.deinitialize(); slots.deallocate() }
+        var offsets: [Int] = []
+        var offset = 0
+        for group in groups { offsets.append(offset); offset += group.count }
+        // Each worker writes only its own slots.
+        DispatchQueue.concurrentPerform(iterations: groups.count) { g in
+            let cache = StaticPassCache()
+            for (k, i) in groups[g].enumerated() {
+                slots[offsets[g] + k] = FrameRenderer.frame(spec, at: frames[i].time, maxEdge: maxEdge,
+                                                           applyCrop: true, cache: cache)
+            }
+        }
+        var out: [Int: CGImage] = [:]
+        for (g, group) in groups.enumerated() {
+            for (k, i) in group.enumerated() { out[i] = slots[offsets[g] + k] }
+        }
+        return out
     }
 
     /// When the PDF filmstrip samples the clip: `KeyFrames.pick` over the trim.
