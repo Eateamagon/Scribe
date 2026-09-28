@@ -739,6 +739,19 @@ A no-click hold under 0.7 s is discarded as a brush of the key. 15 s cap.
 The HUD is Scribe's own window, so the app-level capture exclusion keeps it
 out of the footage.
 
+### "Record Clicks" gates steps on a held key
+
+`Settings.clickGate` (`ClickGate`): every click, or only clicks with Right
+Option / Right Command / Right Shift held, or with Caps Lock on. Left and right
+are told apart by IOKit's device-dependent bits in the low 16 bits of the raw
+modifier flags (`NX_DEVICERALTKEYMASK` 0x40 etc.); the event's own flags are
+OR'd with `CGEventSource.flagsState` in case one lags. The held key is stripped
+from the step's verb unless its left-hand twin is also down. Control is never
+offered (Control-click is a right-click) and Fn is GIF steps — Fn clicks bypass
+the gate. The app being recorded still receives the modifier; that trade-off is
+why the key is the user's choice. One HUD flash per recording on the first
+ignored click, so a forgotten key is noticed without nagging.
+
 ### The GIF encoder, and what it does not buy
 
 `GifEncoder` is a custom GIF89a writer: one global median-cut palette with the
@@ -957,4 +970,8 @@ No automated tests; verification is the two self-tests plus a manual pass:
     animates, Markdown has `step-NNN.gif`, the PDF shows a filmstrip, and
     Copy for Gmail pasted into a real compose window — record whether the
     GIF animated.
-20. `scribe.log` has no `FAILED` lines.
+20. **Record Clicks ▸ Only While Holding Right ⌥ Option**, record: plain
+    clicks make no step (one "Not recorded" flash), Right-Option clicks do, and
+    their text reads "Click …", not "Option-click …". Left Option alone does
+    not count.
+21. `scribe.log` has no `FAILED` lines.

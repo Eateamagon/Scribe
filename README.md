@@ -65,6 +65,7 @@ The menu also has:
 |---|---|
 | **Ask for a Name When Recording** | Whether starting a new recording prompts for a title. On by default. |
 | **Capture Area ▸** | What ends up in each screenshot. See below. |
+| **Record Clicks ▸** | **Every Click** (default), or only clicks made while holding a key you choose — **Right ⌥ Option**, **Right ⌘ Command**, **Right ⇧ Shift** — or while **Caps Lock** is on. Everything else you click is left out of the guide, so closing a pop-up or a mis-click never becomes a step. The app you are recording still sees the key (an Option-click on a browser link downloads it), so pick the one that does least harm in your apps. The key never shows up in the step text. Holding Fn for a GIF step always records. |
 | **New Guide** (`⌃⌥⌘N`) | Starts an empty guide. The current one is saved and stays in the library — nothing is thrown away, so it does not ask. Also a button in the editor and in the library window. |
 | **Reopen Last Guide** | Loads the most recent recording back into the editor — what gets your guide back after quitting. |
 | **All Guides…** | The library window: every guide on disk, newest first, with the live one badged. |

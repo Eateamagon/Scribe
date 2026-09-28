@@ -204,6 +204,7 @@ extension AppDelegate {
                     self?.exerciseRedactionFlattening()
                     self?.exerciseEditor()
                     self?.exerciseFileNumbering()
+                    self?.exerciseClickGate()
                     Diag.log("SELFTEST-OFFLINE PASSED — \(self?.guide.folder.path ?? "")")
                 }
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { NSApp.terminate(nil) }
@@ -731,6 +732,48 @@ extension AppDelegate {
         Diag.log("SELFTEST-OFFLINE: file numbering after delete+reopen -> \(name); "
                  + "shot-003 untouched=\(before == after)")
         if !ok { Diag.log("SELFTEST-OFFLINE FAILED: a new shot reused a live file number") }
+    }
+
+    /// The Record Clicks key: which raw flags count, and that the held key
+    /// stays out of the step's verb. Synthetic flags — a real hold needs a
+    /// human, like every other click-path check.
+    func exerciseClickGate() {
+        let option = NSEvent.ModifierFlags.option.rawValue
+        let rightOpt = UInt(option) | 0x40, leftOpt = UInt(option) | 0x20
+        let caps = UInt(NSEvent.ModifierFlags.capsLock.rawValue)
+        var ok = true
+        func expect(_ condition: Bool, _ what: String) {
+            if !condition { ok = false; Diag.log("SELFTEST-OFFLINE: click gate — \(what) is wrong") }
+        }
+        expect(ClickGate.off.allows(rawFlags: 0), "off rejects a plain click")
+        expect(ClickGate.rightOption.allows(rawFlags: rightOpt), "right Option not accepted")
+        expect(!ClickGate.rightOption.allows(rawFlags: leftOpt), "left Option accepted")
+        expect(!ClickGate.rightOption.allows(rawFlags: 0), "plain click accepted")
+        expect(ClickGate.rightCommand.allows(rawFlags: UInt(NSEvent.ModifierFlags.command.rawValue) | 0x10),
+               "right Command not accepted")
+        expect(ClickGate.rightShift.allows(rawFlags: UInt(NSEvent.ModifierFlags.shift.rawValue) | 0x04),
+               "right Shift not accepted")
+        expect(ClickGate.capsLock.allows(rawFlags: caps) && !ClickGate.capsLock.allows(rawFlags: 0),
+               "Caps Lock")
+
+        func click(_ raw: UInt) -> NSEvent? {
+            NSEvent.mouseEvent(with: .leftMouseDown, location: .zero,
+                               modifierFlags: NSEvent.ModifierFlags(rawValue: raw),
+                               timestamp: 0, windowNumber: 0, context: nil,
+                               eventNumber: 0, clickCount: 1, pressure: 1)
+        }
+        if let held = click(rightOpt), let both = click(rightOpt | 0x20) {
+            let plain = verb(for: held, gate: .rightOption)
+            let kept = verb(for: both, gate: .rightOption)
+            let ungated = verb(for: held, gate: .off)
+            expect(plain == "Click", "verb with the gate key held (\(plain))")
+            expect(kept == "Option-click", "verb with left Option also held (\(kept))")
+            expect(ungated == "Option-click", "verb with no gate (\(ungated))")
+        } else {
+            expect(false, "synthetic click event")
+        }
+        Diag.log("SELFTEST-OFFLINE: click gate checks \(ok ? "correct" : "FAILED")")
+        if !ok { Diag.log("SELFTEST-OFFLINE FAILED: the Record Clicks key logic") }
     }
 
     // MARK: Shared GIF fixtures

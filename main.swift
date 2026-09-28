@@ -115,6 +115,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// The 15 s cap ended a clip while Fn was still held. Until Fn comes up,
     /// Fn-clicks are ordinary steps rather than the start of another clip.
     var fnCapped = false
+    /// Clicks dropped this recording because the Record Clicks key was not held.
+    var ignoredClicks = 0
 
     // MARK: Lifecycle
 
@@ -242,7 +244,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         gifToggleMode = false
         fnCapped = false
+        ignoredClicks = 0
         fnMonitor.start()
+        let gate = Settings.shared.clickGate
+        if gate != .off {
+            gifHUD.flash(gate.hint, on: Geo.screen(containing: NSEvent.mouseLocation), for: 2.5)
+        }
 
         Diag.log("recording started (guide has \(guide.count) step(s))")
         refreshStatusItem()
@@ -279,7 +286,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// prompt box does not become a step.
     func handleClick(_ event: NSEvent) {
         guard isRecording else { return }
+        // Fn-held clicks are already deliberate, so GIF clips skip the gate.
         if routeToClip(event) { return }
+        // The event's own flags, or the live state in case they lag a frame.
+        let gate = Settings.shared.clickGate
+        guard gate.allows(rawFlags: UInt(event.modifierFlags.rawValue) | ClickGate.liveFlags()) else {
+            ignoredClicks += 1
+            // Once per recording, so a forgotten key is noticed — not on every
+            // click, which is exactly the navigating this setting is for.
+            if ignoredClicks == 1 {
+                gifHUD.flash("Not recorded — \(gate.hint.lowercased())",
+                             on: Geo.screen(containing: NSEvent.mouseLocation), for: 2.0)
+            }
+            return
+        }
         let point = NSEvent.mouseLocation
         guard let screen = Geo.screen(containing: point) else { return }
         let displayID = Geo.displayID(of: screen)
@@ -391,12 +411,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     /// "Click", plus whatever the reader would otherwise have no way to know.
-    func verb(for event: NSEvent) -> String {
+    func verb(for event: NSEvent, gate: ClickGate = Settings.shared.clickGate) -> String {
         if event.type == .rightMouseDown { return "Right-click" }
         if event.type == .otherMouseDown { return "Middle-click" }
 
         var parts: [String] = []
-        let mods = event.modifierFlags
+        var mods = event.modifierFlags
+        if let held = gate.strippedModifier(rawFlags: UInt(mods.rawValue)) { mods.remove(held) }
         if mods.contains(.command) { parts.append("Command") }
         if mods.contains(.shift)   { parts.append("Shift") }
         if mods.contains(.option)  { parts.append("Option") }
@@ -789,6 +810,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 : (guide.isEmpty ? "" : " \(guide.count)")
         button.toolTip = clip ? "Scribe is recording a GIF step — release Fn (or ⌃⌥⌘F) to finish"
             : isRecording ? "Scribe is recording — ⌃⌥⌘R to stop"
+                + (Settings.shared.clickGate == .off ? "" : " · \(Settings.shared.clickGate.hint)")
                           : "Scribe — ⌃⌥⌘R to record"
         statusItem.menu = buildMenu()
     }
@@ -847,6 +869,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         menu.addItem(.separator())
         menu.addItem(buildCaptureScopeItem())
+        menu.addItem(buildClickGateItem())
         menu.addItem(buildGifItem())
 
         menu.addItem(.separator())
@@ -885,6 +908,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// "Capture Area ▸" — what goes in the screenshot. The app list is built
     /// fresh each time the menu opens, from whatever is actually running, so it
     /// is short and relevant rather than a fixed guess.
+    /// "Record Clicks ▸": every click, or only clicks with a chosen key held.
+    func buildClickGateItem() -> NSMenuItem {
+        let current = Settings.shared.clickGate
+        let item = NSMenuItem(title: current == .off ? "Record Clicks: Every Click"
+                                                     : "Record Clicks: \(current.keyName)",
+                              action: nil, keyEquivalent: "")
+        let submenu = NSMenu()
+        for gate in ClickGate.allCases {
+            let entry = NSMenuItem(title: gate.menuTitle,
+                                   action: #selector(setClickGate(_:)), keyEquivalent: "")
+            entry.target = self
+            entry.representedObject = gate.rawValue
+            entry.state = gate == current ? .on : .off
+            submenu.addItem(entry)
+            if gate == .off { submenu.addItem(.separator()) }
+        }
+        submenu.addItem(.separator())
+        submenu.addItem(disabled("The app you are recording still sees the key —"))
+        submenu.addItem(disabled("an Option-click on a link downloads it in a browser."))
+        submenu.addItem(disabled("Holding Fn for a GIF step always records."))
+        item.submenu = submenu
+        return item
+    }
+
+    @objc func setClickGate(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String,
+              let gate = ClickGate(rawValue: raw) else { return }
+        Settings.shared.clickGate = gate
+        Diag.log("record clicks: \(gate.menuTitle)")
+        refreshStatusItem()
+        if isRecording, gate != .off {
+            gifHUD.flash(gate.hint, on: Geo.screen(containing: NSEvent.mouseLocation), for: 2.5)
+        }
+    }
+
     func buildCaptureScopeItem() -> NSMenuItem {
         let current = Settings.shared.captureScope
         let item = NSMenuItem(title: "Capture Area: \(current.label)",

@@ -222,6 +222,95 @@ enum CaptureScope: Equatable {
 }
 
 @MainActor
+/// Which key, if any, has to be held for a click to become a step — so that
+/// clicking around between steps (closing a pop-up, scrolling a list, a
+/// mis-click) stays out of the guide.
+///
+/// Right-hand keys only, so the left ones keep working for ordinary
+/// shortcuts. The app being demonstrated still sees the modifier (an
+/// Option-click on a link in Safari or Chrome downloads it), which is why the
+/// key is the user's choice. Control is not offered: Control-click is a
+/// right-click everywhere. Fn is not offered: it records GIF steps.
+enum ClickGate: String, CaseIterable {
+    case off, rightOption, rightCommand, rightShift, capsLock
+
+    /// IOKit's device-dependent NX_DEVICE…KEYMASK bits, which ride along in
+    /// the low bits of NSEvent / CGEvent modifier flags and tell left from right.
+    private var rightBit: UInt? {
+        switch self {
+        case .rightOption:  return 0x40
+        case .rightCommand: return 0x10
+        case .rightShift:   return 0x04
+        default:            return nil
+        }
+    }
+
+    private var leftBit: UInt? {
+        switch self {
+        case .rightOption:  return 0x20
+        case .rightCommand: return 0x08
+        case .rightShift:   return 0x02
+        default:            return nil
+        }
+    }
+
+    private var modifier: NSEvent.ModifierFlags? {
+        switch self {
+        case .rightOption:  return .option
+        case .rightCommand: return .command
+        case .rightShift:   return .shift
+        default:            return nil
+        }
+    }
+
+    /// Short name for the key, as the HUD and the menu title show it.
+    var keyName: String {
+        switch self {
+        case .off:          return "any key"
+        case .rightOption:  return "Right ⌥ Option"
+        case .rightCommand: return "Right ⌘ Command"
+        case .rightShift:   return "Right ⇧ Shift"
+        case .capsLock:     return "Caps Lock"
+        }
+    }
+
+    var menuTitle: String {
+        switch self {
+        case .off:      return "Every Click"
+        case .capsLock: return "Only While Caps Lock Is On"
+        default:        return "Only While Holding \(keyName)"
+        }
+    }
+
+    var hint: String {
+        self == .capsLock ? "Turn on Caps Lock to record clicks" : "Hold \(keyName) to record a click"
+    }
+
+    /// Whether a click with these raw modifier flags counts.
+    func allows(rawFlags: UInt) -> Bool {
+        switch self {
+        case .off:      return true
+        case .capsLock: return rawFlags & NSEvent.ModifierFlags.capsLock.rawValue != 0
+        default:        return rightBit.map { rawFlags & $0 != 0 } ?? true
+        }
+    }
+
+    /// The modifier to leave out of the step's verb. Holding the key is
+    /// Scribe's business, not an instruction for the reader — "Option-click
+    /// Save" would be wrong. Kept when the left-hand twin is down too, since
+    /// then the modifier really was part of the click.
+    func strippedModifier(rawFlags: UInt) -> NSEvent.ModifierFlags? {
+        guard let modifier, let rightBit, let leftBit,
+              rawFlags & rightBit != 0, rawFlags & leftBit == 0 else { return nil }
+        return modifier
+    }
+
+    /// The live modifier state, including the device-dependent bits.
+    static func liveFlags() -> UInt {
+        UInt(CGEventSource.flagsState(.combinedSessionState).rawValue)
+    }
+}
+
 final class Settings {
     static let shared = Settings()
     private let defaults = UserDefaults.standard
@@ -237,6 +326,12 @@ final class Settings {
     var exportTheme: ExportTheme {
         get { ExportTheme.with(id: defaults.string(forKey: "exportTheme") ?? "scribe") }
         set { defaults.set(newValue.id, forKey: "exportTheme") }
+    }
+
+    /// Every click is a step unless the user has chosen a key to hold.
+    var clickGate: ClickGate {
+        get { ClickGate(rawValue: defaults.string(forKey: "clickGate") ?? "") ?? .off }
+        set { defaults.set(newValue.rawValue, forKey: "clickGate") }
     }
 
     /// Whether starting a recording on an empty guide asks for a name first.
