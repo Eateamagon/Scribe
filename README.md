@@ -4,7 +4,7 @@ Record a workflow by doing it. Get a numbered, screenshotted how-to guide out
 the other end.
 
 A local recreation of what [scribehow.com](https://scribehow.com) does, for
-macOS, as a single-file Swift menu-bar app. Not the commercial product, and
+macOS, as a Swift menu-bar app. Not the commercial product, and
 nothing to do with AI "scribe" note-takers.
 
 ## What it does
@@ -20,8 +20,14 @@ While recording, every click you make becomes a step:
    keeps an automatic sentence like `Click "Save" in Preview` that you can
    rewrite later.
 
+**Hold Fn (🌐) while you click** and that step is recorded as a short animated
+GIF instead of a still — every click you make while holding goes into the one
+GIF, and letting go ends it. Good for drags, menus that open on hover, and
+anything that is easier to watch than to read.
+
 When you stop, the guide editor opens: reorder steps, delete the mis-clicks,
-rewrite the text, then export to a web page, a PDF, or a Markdown folder.
+rewrite the text, crop and spotlight the pictures, trim the GIFs, then export
+to a web page, a PDF, or a Markdown folder.
 
 ## Quick start
 
@@ -45,6 +51,8 @@ never asked, switch off **Ask for a Name When Recording** in the menu.
 | `⌃⌥⌘R` | start / stop recording |
 | `⌃⌥⌘E` | open the guide editor, or bring it back to the front |
 | `⌃⌥⌘G` | open the guide library — every guide you have recorded |
+| hold **Fn** | while recording: record this step as a GIF (let go to finish) |
+| `⌃⌥⌘F` | while recording: start / stop a GIF step without holding Fn |
 
 Both are Carbon hotkeys, which need no permissions, so you can always stop a
 recording even if everything else has been refused.
@@ -138,9 +146,57 @@ folder to the Trash, so it is recoverable.
 A guide only appears here once it has at least one step; an empty guide writes
 nothing to disk.
 
+## GIF steps
+
+While recording, **hold Fn (🌐)**. The menu-bar icon turns orange and a small
+timer appears at the top of the screen (it never shows up in the recording).
+Click as many times as you like; let go of Fn to finish. You get one step, one
+prompt for its text, and a still screenshot from just before your first click.
+
+- A GIF step is at most **15 seconds**. Holding past that stops the clip.
+- A quick tap of Fn with no clicks is ignored.
+- Holding an arrow key or an F-key does not start a GIF, even though macOS
+  treats those as Fn keys.
+- The pointer and a ripple on each click are drawn into the GIF; switch that
+  off in the editor per step, or for new GIFs under **GIF Steps ▸ Show Pointer
+  in New GIFs**.
+- **The Globe key** normally opens the emoji picker when you let go of it. The
+  first time you record, Scribe says so once: set System Settings › Keyboard ›
+  **Press 🌐 key to** → **Do Nothing**, or use **⌃⌥⌘F** to start and stop a GIF
+  instead of holding Fn.
+
+Only steps recorded with Fn have footage. In the editor they can be flipped
+between **GIF** and **Screenshot** at any time; the choice decides what the
+exports show.
+
+## The editor
+
+Three panes: the **steps** on the left (drag to reorder, Backspace to delete —
+⌘Z brings a deleted step back), the **picture** in the middle, and the
+**inspector** on the right with the step text and every setting for the
+selected step.
+
+For a GIF step, under the picture: **Space** plays and pauses, the scrubber
+moves through it, the **trim bar**'s two handles cut dead time off either end,
+and **Use as Still** makes the current frame the step's screenshot (**Revert
+Still** undoes that).
+
+Inspector, **Image**:
+
+| Control | Does |
+|---|---|
+| **Crop…** | Drag the frame or its handles over the full picture (Free, 16:9, 4:3, 1:1), then **Apply** or ↩. Works on GIFs too. **Reset Crop** takes it off. |
+| **Spotlight** | **Dim** darkens everything outside the area you drag; **Magnify** also shows that area enlarged in an inset you can drag into place. |
+| **Replace Image** | Swap in a picture from a file or the clipboard, keeping the step's text. Covers, drawings and crop are cleared, because they belonged to the old picture. |
+| **Auto highlight** | Scribe's own red box or ring for that step. |
+
+Everything here is non-destructive: the original screenshot stays on disk and
+any setting can be changed back.
+
 ## Drawing on a screenshot
 
-Select a step, pick a tool under the preview, and **drag on the picture**.
+Select a step, pick a tool in the strip above the picture, and **drag on the
+picture**.
 **Click anything you drew to remove it** — one gesture, whatever tool is
 selected.
 
@@ -157,9 +213,9 @@ Pick a colour from the swatches. **Undo** removes the last thing you added —
 cover or drawing, whichever it actually was. **Clear** removes everything on
 the step.
 
-**Expand** hands the whole window to the picture, which is what you want for
-anything fiddly; the ‹ › buttons move between steps while it is expanded, and
-**Show Steps** puts the list back.
+**Expand** hides both side panes so the picture gets the whole window, which is
+what you want for anything fiddly; the ‹ › buttons move between steps while it
+is expanded.
 
 **Auto highlight** turns off Scribe's own red box or ring for that step. Use it
 when the automatic guess landed on the wrong control and you have drawn your
@@ -167,7 +223,7 @@ own — otherwise you get two markers disagreeing with each other.
 
 Drawings are stored with the guide, so they survive quitting and reopening, and
 they are applied everywhere a step gets drawn — the preview, the row
-thumbnails, and all four exports.
+thumbnails, every frame of a GIF, and all four exports.
 
 ## Hiding sensitive information
 
@@ -253,8 +309,15 @@ crash or a misclicked "New Guide" costs you nothing.
 | **Copy for Gmail** | Puts the whole guide on the clipboard, formatted. Open a compose window and press ⌘V. |
 | **Web page** | One `.html` file with the images base64'd inside it. Nothing to lose track of when you send it. Prints cleanly from a browser. |
 | **PDF** | US Letter, drawn directly, one step never split across a page break. Choose **steps per page** when you save. |
-| **Markdown** | A folder: `guide.md` plus `images/`. Markdown cannot carry its own pictures. |
+| **Markdown** | A folder: `guide.md` plus `images/`. Markdown cannot carry its own pictures. GIF steps are `.gif` files. |
 | **Email HTML file** | The Gmail-safe version as a file, for when you would rather open it, select all and copy by hand. |
+
+**GIF steps in each export:** the web page and Markdown animate them (people who
+have asked their Mac to reduce motion see the still). Paper cannot animate, so
+the PDF prints a **filmstrip** — the moments just after each click, plus the
+start and the end, up to four frames. The Gmail copy uses a small GIF (600 px,
+under 1.5 MB); one that will not fit becomes its still plus a note that the
+animation is in the web version.
 
 ### Steps per page in a PDF
 
@@ -343,14 +406,17 @@ Writes `editor-shot.png` beside the app and dumps every view's frame to the log.
   non-activating panel, so the app you are demonstrating keeps its window
   order, but the caret does move. Ignore the box entirely if that gets in the
   way and write the steps afterward in the editor.
-- **No undo.** Deleting a step and erasing a guide both take effect
-  immediately. Nothing is truly lost — the screenshots stay on disk, the
-  library lists every guide, and its Delete moves folders to the Trash.
+- **Undo for a deleted step lasts while the editor is open** (⌘Z). Nothing is
+  truly lost either way — the screenshots stay on disk, the library lists every
+  guide, and its Delete moves folders to the Trash.
 - **The Gmail paste has not been tested against a real compose window.** The
   export is checked against Gmail's documented restrictions and the clipboard
   round-trips correctly, but whether Gmail keeps the embedded images when you
-  paste is the one thing that needs a human. If they vanish, use **Export ▸
+  paste is the one thing that needs a human — and whether an animated GIF
+  stays animated once pasted is untested too. If images vanish, use **Export ▸
   Email HTML file** and copy from a browser instead.
+- **GIF files are big on disk.** A full-screen 15 s clip is about 60 MB of
+  frames in the session folder; a single window is much less.
 - **Capture cropping needs Accessibility** to know where a window is. Without
   it every step falls back to the whole screen.
 - **Covers are rectangles you draw, not elements you pick.** Scribe cannot

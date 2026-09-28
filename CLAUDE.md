@@ -9,8 +9,10 @@ classroom/PD use. It is **not** the commercial Scribe product, and it is
 before acting on a request that says only "scribe". (The sibling project
 CursorGlow lost a round of work to exactly this kind of name collision.)
 
-Single-file Swift AppKit app, no Xcode project, built by a shell script — the
-same shape as `../CursorGlow`, deliberately. Most of the hard-won macOS
+Swift AppKit app, no Xcode project, built by a shell script — the same shape
+as `../CursorGlow`, deliberately. It was one `main.swift` until GIF steps and
+the studio editor pushed it past 13,000 lines; it is now a handful of files
+compiled together (see Layout). Most of the hard-won macOS
 knowledge in `../CursorGlow/CLAUDE.md` applies here too; read it.
 
 ## Commands
@@ -32,7 +34,22 @@ open Scribe.app --args --dump-context       # context line for every saved guide
 open Scribe.app --args --shot-nameprompt    # photograph the guide-name panel
 open Scribe.app --args --shot-pdf           # synthetic 6-step guide at every page density
 open Scribe.app --args --shot-themes        # the same guide exported in every theme
+open Scribe.app --args --selftest-media     # renderer, crop, spotlight, GIF encoder, flatten
+open Scribe.app --args --selftest-gif       # GIF recorder (synthetic) + GIF-aware exports
+open Scribe.app --args --shot-studio        # synthetic guide with a GIF step, editor photographed
+open Scribe.app --args --probe-fn           # 20 s log of every Fn signal — a human holds Fn
 ```
+
+For tests, prefer running the binary directly with the data root redirected,
+so synthetic guides never land in the real library:
+
+```bash
+SCRIBE_DATA_ROOT=/tmp/scribe-test Scribe.app/Contents/MacOS/Scribe --selftest-offline
+SCRIBE_NO_KILL=1 bash build.sh     # build without quitting a running copy
+```
+
+`scribe.log` is **truncated on every launch** — run one flag, read the log,
+then the next. Grepping after two runs shows only the second.
 
 `--shot-editor` writes `editor-shot.png` beside the .app and dumps every view's
 frame to the log as `SHOT` lines. It exists because the terminal's
@@ -46,7 +63,21 @@ happened first.
 
 ## Layout
 
-Everything is in `main.swift`, sectioned with `MARK:` banners:
+`build.sh` compiles an explicit `SOURCES=(…)` list (never a `*.swift` glob,
+which would pick up stray scripts). Top-level entry code stays in `main.swift`.
+
+| File | Holds |
+|---|---|
+| `main.swift` | `HotKeyCenter`, `AppDelegate` (menu, recording, GIF wiring), entry point |
+| `Core.swift` | `Diag`, `Geo`, `CaptureScope`/`Settings`, `Img`, `Redaction`, `Markup`, `Annotator`, `GuideStep`, `Guide` |
+| `Media.swift` | GIF clip model, `RenderSpec`, `FrameRenderer`, `PointerOverlay`, key frames, the GIF89a encoder, `MediaPreparer` |
+| `Capture.swift` | `Capture`/`DisplayStreamOutput`, `AXInspector`, prompt box, guide-name panel |
+| `Recorder.swift` | `FnMonitor`, `GifRecorder`, recording HUD, Globe-key notice |
+| `Export.swift` | `ExportTheme`, `Export` (HTML, email, Markdown, PDF + filmstrips, async doorways) |
+| `Editor.swift` | `MarkupCanvas`, transport/trim views, `ClipPlayer`, the studio `EditorWindowController`, library |
+| `SelfTest*.swift` | `extension AppDelegate` self-tests and window photographs |
+
+Types by section:
 
 | Section | What it does |
 |---|---|
@@ -56,22 +87,25 @@ Everything is in `main.swift`, sectioned with `MARK:` banners:
 | `Redaction` / `RedactionStyle` | Normalised cover rects stored on a step |
 | `Annotator` | Redacts, then draws the red box / ring and the numbered badge |
 | `Markup` / `MarkupKind` / `MarkupColor` | Arrows, outlines, freehand, highlighter, text |
-| `MarkupCanvas` | The editor preview; drag to draw, click anything to remove |
+| `MarkupCanvas` | The editor canvas: draw, crop and spotlight modes; click anything to remove |
+| `FrameRenderer` | The one place pixels are produced — stills and GIF frames alike |
+| `GifRecorder` / `FnMonitor` | Fn-held footage: region, frames to disk, pointer track, clicks |
 | `GuideStep` / `Guide` | Model + `guide.json` persistence |
 | `DisplayStreamOutput` / `Capture` | One `SCStream` per display — needs Screen Recording |
 | `AXInspector` | What was clicked, and where its frame is — needs Accessibility |
 | `PromptWindow` / `PromptBox` | The floating "describe this step" panel |
 | `CaptureScope` / `Settings` | What goes in the shot; UserDefaults-backed |
 | `SeparatorRowView` | Table rows that draw their own hairline |
-| `EditorWindowController` | Reorder / delete / rewrite / export |
+| `EditorWindowController` | Three-pane studio: list, canvas + transport, inspector |
 | `GuideSummary` / `LibraryWindowController` | Every guide on disk |
 | `ExportTheme` | School branding: colours, stripe, optional logo from `assets/` |
 | `Export` | HTML, Gmail-safe HTML, Markdown, PDF (`PageDensity` picks the layout) |
 | `HotKeyCenter` | Carbon `RegisterEventHotKey` — needs no permission |
 | `AppDelegate` | Menu, click monitor, recording lifecycle, self-tests |
 
-Entry point is top-level code at the bottom — the file **must** stay named
-`main.swift` for that to compile.
+Entry point is top-level code at the bottom of `main.swift` — that file **must**
+keep its name for it to compile. Anything a self-test extension in another file
+touches cannot be `private` on `AppDelegate`.
 
 ## Hard-won gotchas
 
@@ -301,7 +335,8 @@ the panel was photographed. Anything with a rendered surface gets looked at.
 ### Rendering HTML to a picture, to actually look at it
 
 The terminal cannot screenshot, and the in-app browser refuses `file://`. So
-`scratchpad/html2png.swift` loads an HTML file in a WKWebView, calls
+a throwaway `html2png.swift` (not in the repo — write it again when needed)
+loads an HTML file in a WKWebView, calls
 `createPDF`, and rasterises page one. `createPDF`'s "everything on one enormous
 page" behaviour is a bug for the guide PDF export and exactly the right thing
 here: it gives one tall image of the whole email. That is how the Gmail
@@ -407,11 +442,14 @@ plain-text fallback beneath it. The structural check that matters lives in the
 testing section below; the actual paste into Gmail has never been verified from
 here and needs a human.
 
-### The render order is redact → highlight → markup, and it is load-bearing
+### The render order is load-bearing
 
-`GuideStep.annotated` runs three passes in that order. Covers go on first so
-nothing drawn later can be hidden underneath one; the automatic highlight next;
-hand-drawn markup last so a user's arrow is never buried behind the auto box.
+`FrameRenderer` (reached through `GuideStep.annotated` for stills) runs:
+redact → spotlight dim → highlight (still) *or* pointer + click ripple (GIF
+frame) → markup → **crop** → magnifier inset. Covers go on first so nothing
+drawn later can be hidden underneath one; the dim before the highlight so the
+red box is not dimmed; hand-drawn markup after the automatic mark so a user's
+arrow is never buried; crop last so no stored geometry ever needs remapping.
 `showHighlight` skips the middle pass — it exists because once you can draw
 your own box, the Accessibility guess landing on the wrong control leaves two
 markers disagreeing and no way to remove the misleading one.
@@ -448,12 +486,12 @@ app being demonstrated. Escape cancels the recording outright rather than
 starting an unnamed one — the hint says so, because a prompt that silently
 starts recording when dismissed is worse than no prompt.
 
-### Redaction lives in `GuideStep.annotated`, and must stay there
+### Redaction lives in `FrameRenderer`, and must stay there
 
-`Annotator.redact` is applied inside `annotated(number:)`, before the highlight
-is drawn. Every export, every thumbnail and the editor preview already funnel
-through that one function, so there is no code path that can render a step and
-forget to cover it. Move redaction into the exporters and you get four places
+`Annotator.redact` is the first pass of `FrameRenderer.compose`, which
+`annotated(number:)`, every GIF frame, every export, every thumbnail and the
+editor canvas funnel through, so there is no code path that can render a step
+and forget to cover it. Move redaction into the exporters and you get four places
 that each have to remember — and the one that forgets ships somebody's name.
 
 The mosaic is a downscale-and-redraw with `interpolationQuality = .none`, not a
@@ -659,6 +697,113 @@ window. The click monitor and the prompt box need a real human click.
 (unlike keyboard monitors). So clicks are always captured; only the *names* of
 what was clicked need Accessibility.
 
+### GIF steps: one region, one coordinate space
+
+A GIF step is an ordinary step (still, click, target, text) plus footage in
+`gif-NNN/` beside `shot-NNN.png`: `clip.json` (`ClipData` — frames, a 30 Hz
+pointer track, clicks; immutable) and `frame-0001.jpg…`. What the user edits
+(trim, pointer on/off) is `GifClip` on the step in `guide.json`.
+
+The region is decided at **Fn-down** from what is under the pointer, through
+the same `captureRegion` a still uses, and every frame *and* the still are the
+same crop at the same pixel size. That is what lets a step flip between GIF and
+screenshot, and lets covers, drawings, crop and spotlight apply to every frame
+unchanged. The still comes from the first click's pre-click frame, exactly as
+a still step's does. Deciding the region at the first click instead, or storing
+full-display frames and cropping later, breaks one or the other.
+
+Shots and clips share one file-number sequence (`Guide.reserveFileNumber`),
+derived from the highest `shot-NNN` / `gif-NNN` on disk — never `steps.count`,
+which after a delete and reopen handed out a live step's number and
+overwrote its picture.
+
+### Fn is polled, never observed
+
+A global `flagsChanged` monitor is a keyboard monitor and needs Input
+Monitoring. `FnMonitor` polls `NSEvent.modifierFlags` + the CGEventSource flag
+state at 30 Hz on a `.common`-mode timer (a default-mode timer stops while a
+menu is open — exactly when a menu demo is being held). 150 ms to count as
+down, 80 ms as up. Confirmed on this Mac in a real recording (2026-09-25).
+
+Arrows, Home/End, Page Up/Down, forward delete and F-keys carry the
+`.function` flag too, so a hold does not *start* while one of those is down
+(`FnMonitor.flaggedKeyHeld`). The Globe key's own action (emoji picker by
+default) still fires on release; a one-time notice says to set
+"Press 🌐 key to" to Do Nothing, or use ⌃⌥⌘F (press on / press off).
+
+Frames: ≤10 fps, **one in flight** on a serial queue — a frame arriving while
+the writer is busy is dropped, not queued, because queued frames pin IOSurfaces
+from the stream's pool (hence `queueDepth` 5). `finish()` writes the newest
+frame at release so a dropped frame cannot cut off what the last click did.
+A no-click hold under 0.7 s is discarded as a brush of the key. 15 s cap.
+The HUD is Scribe's own window, so the app-level capture exclusion keeps it
+out of the footage.
+
+### The GIF encoder, and what it does not buy
+
+`GifEncoder` is a custom GIF89a writer: one global median-cut palette with the
+accent red, white, cursor colours and the step's own drawing colours forced in
+exactly, no dithering, delta frames with transparency, identical frames merged,
+centisecond delays with carried rounding, and a stable-index pass so JPEG noise
+does not shimmer flat areas. It is only ~10% smaller than ImageIO — on current
+macOS ImageIO already writes a global palette and delta frames. What the
+custom one buys is exact colours, bounded memory (frames stream through) and
+bailing out early when over an email budget. Forced colours must be rendered
+through the same DeviceRGB→sRGB path as the frames, or they are off by the
+conversion.
+
+### Rendering is off-main, from value snapshots
+
+`GuideStep` is `@MainActor`; `RenderSpec` is a Sendable snapshot of everything
+a render needs. Exports encode GIFs from specs off the main thread
+(`Export.prepareGIFs`, `prepareFilmstrips`) and build the document on main.
+Text in `Annotator` is drawn with Core Text, not `NSAttributedString.draw`,
+so renders are thread-safe — the self-test compares a background render to a
+main-thread one byte for byte. `FrameRenderer.frame(maxEdge:)` caps the
+**output** (after crop), not the source.
+
+### Exports carry GIFs as far as each format allows
+
+HTML: `<picture>` with the still for `prefers-reduced-motion`. Email: GIF at
+1× (600 px, 8 fps), 1.5 MB per GIF and 10 MB per message, falling back to the
+JPEG still plus "(animation in the web version)". Markdown: `step-NNN.gif`.
+PDF: a filmstrip of key frames (just after each click, plus trim start/end,
+≤4) as a row with "›" or a 2×2 grid, whichever gives bigger frames —
+`Export.mediaAspect` measures what will actually be drawn, and pagination uses
+it. Whether Gmail keeps a pasted `data:image/gif` animated is **unverified**.
+
+### Crop and spotlight are stored against the uncropped image
+
+`GuideStep.crop` and `.spotlight` are 0…1 against the stored image, like every
+other piece of geometry; the canvas maps view ⇄ cropped ⇄ stored
+(`stored = crop.origin + shown × crop.size`). The one exception is
+`Spotlight.inset`, which is relative to the cropped output. The editor
+hit-tests the magnifier with `FrameRenderer.magnifierFrame` — the same function
+the renderer places it with; two copies of that arithmetic drifted apart once.
+"Use as Still", "Replace Image" and crop are non-destructive: new files beside
+the old ones, and `originalImageName` keeps the way back. Make Permanent
+rewrites every frame JPEG as well as the stills.
+
+### Studio editor traps
+
+- **NSWindow answers `undo:` itself**, so Edit ▸ Undo never reached the
+  controller. `EditorWindow` keeps typing undo while text is being edited and
+  otherwise hands ⌘Z to the controller's undo stack, which orders drawings
+  against step deletions (Backspace in the list deletes; ⌘Z restores).
+- **Button key equivalents fire before the first responder**, even inside a
+  text view — Space, Return and Esc go through a local key monitor that skips
+  text editing.
+- **NSSplitView's constrain delegate methods switch it to the old resize
+  path**, which shrinks every pane in proportion. `shouldAdjustSizeOfSubview`
+  returns true for the centre pane only. Expand *hides* the side panes.
+- **Views do not clip to bounds on macOS 14+** — fill `bounds`, not `dirtyRect`.
+- **`Guide.changed(kind, index)`** posts what changed; text edits reload one
+  row and never overwrite the inspector's text view while it is first
+  responder. Notifications without userInfo mean "structure".
+- **`NSApp.sendAction(to: nil)` goes to the key window**, which a
+  terminal-launched self-test often is not; tests walk
+  `window.firstResponder` instead.
+
 ## Permissions summary
 
 | Feature | Needs |
@@ -682,10 +827,13 @@ what was clicked need Accessibility.
   real recordings (2026-09-01): `capture stream started … 3456x2234`,
   `prompt box key window: true`, two guides recorded and exported. The
   `.nonactivatingPanel` does take keyboard focus as intended.
-- **No undo for deleting a step.** It is immediate. Survivable — the raw
-  screenshot stays in the session folder — but there is no way back inside the
-  app. **New Guide** is not in this category: it parks the current guide in the
-  library rather than discarding it.
+- **Step deletion is undoable only while the editor stays open** (⌘Z); the
+  files stay in the session folder either way.
+- **GIF steps need a human for:** the 15 s cap, ⌃⌥⌘F, Fn inside a password
+  field (Secure Input), a clip on a second display, and pasting a GIF email
+  into Gmail. A single Fn-held clip has been recorded for real and works.
+- **A plain click inside the 80 ms Fn-release debounce** ends the clip and
+  becomes a normal step; the GIF step then gets no prompt of its own.
 - **The Gmail paste is unverified.** `emailHTML` is checked structurally (no
   `<style>`, no classes, tables, JPEG data URIs, `width` attributes) and the
   clipboard round-trips, but nobody has pasted it into a real compose window
@@ -795,4 +943,18 @@ No automated tests; verification is the two self-tests plus a manual pass:
     Gmail. Logo and stripe in the header, badges in the accent colour, and the
     red highlight on the screenshots *unchanged*. `--shot-themes` writes all
     three at once.
-16. `scribe.log` has no `FAILED` lines.
+16. `--selftest-media`, `--selftest-gif` and `--shot-studio` (with
+    `SCRIBE_DATA_ROOT` set) each end in `… PASSED`; look at `studio-*.png`.
+17. Record, hold Fn, click twice, release: one GIF step (orange status item
+    and HUD while held), one prompt after release, the still showing the
+    screen *before* the first click. Hold ↓ for two seconds while recording:
+    no GIF starts. ⌃⌥⌘F starts and stops a clip without Fn.
+18. In the editor, on a GIF step: Space plays, the trim bar trims, Use as Still
+    / Revert Still, Screenshot ⇄ GIF, Crop… then Apply, Spotlight Dim and
+    Magnify (drag the inset), Replace Image from the clipboard. Backspace in
+    the list deletes a step and ⌘Z brings it back.
+19. Export all four formats from a guide with a GIF step: the web page
+    animates, Markdown has `step-NNN.gif`, the PDF shows a filmstrip, and
+    Copy for Gmail pasted into a real compose window — record whether the
+    GIF animated.
+20. `scribe.log` has no `FAILED` lines.
