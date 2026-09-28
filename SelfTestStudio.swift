@@ -264,6 +264,16 @@ extension AppDelegate {
         check(guide.count == 2 && !guide.steps.contains { $0.id == doomed } && editor.table.selectedRow == 1,
               "Delete removed the selected step and selected its neighbour")
 
+        // 13. ⌘Z brings a deleted step back, in its old place — Backspace in
+        //     the list is too easy to hit for deletion to be one-way.
+        let undoDelete = NSMenuItem(title: "Undo", action: Selector(("undo:")), keyEquivalent: "z")
+        check(window.validateMenuItem(undoDelete) && undoDelete.title == "Undo Delete Step",
+              "Edit ▸ Undo offers to bring the deleted step back")
+        _ = (window.firstResponder ?? window).tryToPerform(Selector(("undo:")), with: undoDelete)
+        await pause(0.3)
+        check(guide.count == 3 && guide.steps[1].id == doomed,
+              "Undo restored the deleted step at its old position")
+
         Diag.log(failures.isEmpty ? "SHOT-STUDIO PASSED — \(guide.folder.path)"
                                   : "SHOT-STUDIO FAILED: \(failures.joined(separator: "; "))")
     }

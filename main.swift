@@ -572,7 +572,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         // Fn-click before the 150 ms hold registered: start the clip on the
         // click itself rather than losing the click to a still step.
-        guard fnHeld, !fnCapped, beginClip() else { return false }
+        guard fnHeld, !fnCapped, !FnMonitor.flaggedKeyHeld(), beginClip() else { return false }
         fnMonitor.assumeDown()
         addClipClick(event)
         return true

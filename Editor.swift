@@ -3125,18 +3125,64 @@ final class EditorWindowController: NSWindowController,
     // `undo:` itself, so the responder chain never reaches this controller on
     // its own. Text views keep their typing undo; this is the annotations'.
 
+    /// What ⌘Z can take back, newest last. Annotations are also undoable
+    /// straight from the model (by draw order), which covers drawings made
+    /// before this window opened; the stack is what orders them against step
+    /// deletions, which the model cannot undo on its own.
+    enum UndoItem {
+        case annotation(UUID)
+        case deletion(GuideStep, Int)
+    }
+    private var undoStack: [(item: UndoItem, folder: URL)] = []
+
+    private func pushUndo(_ item: UndoItem) {
+        undoStack.append((item, guide.folder))
+        if undoStack.count > 50 { undoStack.removeFirst() }
+    }
+
+    /// Entries from another guide (New Guide, or one opened from the
+    /// library) must never be replayed into this one.
+    private func pruneUndo() {
+        undoStack.removeAll { $0.folder != guide.folder }
+    }
+
     var canUndoAnnotation: Bool {
-        (currentStep?.annotationCount ?? 0) > 0 && canvas.mode != .crop
+        guard canvas.mode != .crop else { return false }
+        pruneUndo()
+        return !undoStack.isEmpty || (currentStep?.annotationCount ?? 0) > 0
+    }
+
+    private var undoTitle: String {
+        if case .deletion? = undoStack.last?.item { return "Undo Delete Step" }
+        return "Undo Drawing"
     }
 
     @objc func undo(_ sender: Any?) {
+        pruneUndo()
+        while let entry = undoStack.popLast() {
+            switch entry.item {
+            case .deletion(let step, let index):
+                guard !guide.steps.contains(where: { $0.id == step.id }) else { continue }
+                guide.insert(step, at: index)
+                select(min(index, guide.count - 1))
+                report("Restored step \(min(index, guide.count - 1) + 1).")
+                return
+            case .annotation(let id):
+                guard let row = guide.steps.firstIndex(where: { $0.id == id }),
+                      guide.steps[row].annotationCount > 0 else { continue }
+                if row != currentRow { select(row) }
+                guide.undoLastAnnotation(at: row)
+                return
+            }
+        }
         undoAnnotation()
     }
 
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
         if menuItem.action == #selector(undo(_:)) {
-            menuItem.title = canUndoAnnotation ? "Undo Drawing" : "Undo"
-            return canUndoAnnotation
+            let can = canUndoAnnotation
+            menuItem.title = can ? undoTitle : "Undo"
+            return can
         }
         return true
     }
@@ -3479,12 +3525,16 @@ final class EditorWindowController: NSWindowController,
 
     private func addRedaction(_ rect: CGRect, color: MarkupColor) {
         guard let row = currentRow else { return }
+        let before = guide.steps[row].annotationCount
         guide.addRedaction(Redaction(rect: rect, style: selectedStyle, color: color), at: row)
+        if guide.steps[row].annotationCount > before { pushUndo(.annotation(guide.steps[row].id)) }
     }
 
     private func addMarkup(_ markup: Markup) {
         guard let row = currentRow else { return }
+        let before = guide.steps[row].annotationCount
         guide.addMarkup(markup, at: row)
+        if guide.steps[row].annotationCount > before { pushUndo(.annotation(guide.steps[row].id)) }
     }
 
     private func removeAnnotation(at point: CGPoint) {
@@ -3553,7 +3603,12 @@ final class EditorWindowController: NSWindowController,
     @objc private func deleteStep() {
         guard let row = currentRow else { return }
         commitNote()
+        let step = guide.steps[row]
         guide.remove(at: row)
+        // Backspace in the list deletes, and a stray Backspace is easy; ⌘Z has
+        // to bring the step back or that key is a data-loss shortcut.
+        pushUndo(.deletion(step, row))
+        report("Deleted step \(row + 1). ⌘Z brings it back.")
         // `refresh` (via the notification) already handed the selection to
         // the neighbour; this keeps it there even if the list was reloaded
         // some other way.
@@ -3686,17 +3741,20 @@ final class EditorWindowController: NSWindowController,
                     min(max(picker.indexOfSelectedItem, 0), Export.PageDensity.choices.count - 1)]
                 Settings.shared.pdfDensity = density
                 self.beginBusy("Rendering PDF (\(density.label))…")
-                Export.pdf(self.guide, to: url, density: density) { error in
-                    // Hop explicitly: the completion may arrive off the main
-                    // thread once GIF filmstrips render in the background.
-                    let failure = error?.localizedDescription
-                    DispatchQueue.main.async {
-                        MainActor.assumeIsolated {
-                            self.endBusy()
-                            if let failure {
-                                self.report("PDF export failed: \(failure)")
-                            } else {
-                                self.finishExport(at: url)
+                Task { @MainActor in
+                    let strips = await Export.prepareFilmstrips(self.guide)
+                    Export.pdf(self.guide, to: url, density: density, strips: strips) { error in
+                        // Hop explicitly: the completion may arrive off the main
+                        // thread once GIF filmstrips render in the background.
+                        let failure = error?.localizedDescription
+                        DispatchQueue.main.async {
+                            MainActor.assumeIsolated {
+                                self.endBusy()
+                                if let failure {
+                                    self.report("PDF export failed: \(failure)")
+                                } else {
+                                    self.finishExport(at: url)
+                                }
                             }
                         }
                     }

@@ -1464,6 +1464,16 @@ final class Guide {
         return step
     }
 
+    /// Puts a step back — the editor's undo for a deletion. The step's files
+    /// never left the folder (`remove` does not delete them), so this is only
+    /// the list.
+    func insert(_ step: GuideStep, at index: Int) {
+        let at = min(max(index, 0), steps.count)
+        steps.insert(step, at: at)
+        renumberThumbnails(from: at)
+        changed(.structure, index: at)
+    }
+
     func remove(at index: Int) {
         guard steps.indices.contains(index) else { return }
         steps.remove(at: index)

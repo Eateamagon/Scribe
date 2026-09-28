@@ -571,8 +571,11 @@ enum Export {
     ///
     /// Drawing it by hand is about two hundred lines and gives exact control
     /// over where a page breaks, which is the entire reason to want a PDF.
+    /// `strips` are filmstrips already rendered off the main thread by
+    /// `prepareFilmstrips`; without them they are rendered here.
     static func pdf(_ guide: Guide, to url: URL,
                     density: PageDensity = .fit,
+                    strips prepared: [UUID: [CGImage]]? = nil,
                     completion: @escaping (Error?) -> Void) {
         var box = CGRect(x: 0, y: 0, width: 612, height: 792)     // US Letter, points
         let content = box.insetBy(dx: 52, dy: 52)
@@ -587,8 +590,8 @@ enum Export {
         // Paper cannot animate, so a GIF step prints as a filmstrip of its key
         // moments. Rendered once up front: the fixed layout can fall back to
         // the flowing one, and neither should render them twice.
-        var strips: [UUID: [CGImage]] = [:]
-        for (i, step) in guide.steps.enumerated() {
+        var strips = prepared ?? [:]
+        for (i, step) in guide.steps.enumerated() where strips[step.id] == nil {
             let spec = step.renderSpec(number: i + 1)
             guard spec.rendersAsGIF else { continue }
             let frames = MediaPreparer.filmstrip(spec)
@@ -761,12 +764,13 @@ enum Export {
 
     /// Height a step wants when nothing is constraining it.
     private static func naturalHeight(_ step: GuideStep, number: Int,
-                                      width: CGFloat, ceiling: CGFloat) -> CGFloat {
+                                      width: CGFloat, ceiling: CGFloat,
+                                      strips: [UUID: [CGImage]]? = nil) -> CGFloat {
         let textWidth = width - pdfIndent
         let bodyH = measure(bodyText(step), width: textWidth)
         let subH = contextText(step).map { measure($0, width: textWidth) } ?? 0
         var imageH: CGFloat = 0
-        let aspect = mediaAspect(step)
+        let aspect = mediaAspect(step, strips: strips)
         if aspect > 0 {
             imageH = min(textWidth * aspect, ceiling - bodyH - subH - 34)
         }
@@ -779,12 +783,24 @@ enum Export {
     ///
     /// This used to be `annotated()` — a full redact-highlight-markup render —
     /// called only to read two numbers off the result.
-    static func mediaAspect(_ step: GuideStep) -> CGFloat {
+    ///
+    /// `strips` is what the PDF actually rendered. A GIF step missing from it
+    /// (its frames could not be read) is drawn as its still, so it must be
+    /// measured as one too — otherwise pagination reserves a filmstrip-sized
+    /// hole around a small screenshot.
+    static func mediaAspect(_ step: GuideStep, strips: [UUID: [CGImage]]? = nil) -> CGFloat {
         let spec = step.renderSpec(number: 1)
-        if spec.rendersAsGIF, let clip = spec.clip, let data = spec.clipData {
+        let width: CGFloat = 612 - 104 - pdfIndent      // the flowing column
+        if spec.rendersAsGIF, let strip = strips?[step.id], let first = strip.first,
+           first.width > 0 {
+            let layout = stripLayout(count: strip.count,
+                                     aspect: CGFloat(first.height) / CGFloat(first.width),
+                                     in: CGSize(width: width, height: .greatestFiniteMagnitude))
+            return layout.size.width > 0 ? layout.size.height / layout.size.width : 0
+        }
+        if spec.rendersAsGIF, strips == nil, let clip = spec.clip, let data = spec.clipData {
             let frame = croppedAspect(data.pixelSize, crop: spec.crop)
             guard frame > 0 else { return 0 }
-            let width: CGFloat = 612 - 104 - pdfIndent      // the flowing column
             let layout = stripLayout(count: KeyFrames.pick(clip, data).count, aspect: frame,
                                      in: CGSize(width: width, height: .greatestFiniteMagnitude))
             return layout.size.width > 0 ? layout.size.height / layout.size.width : 0
@@ -996,7 +1012,8 @@ enum Export {
 
         for (i, step) in guide.steps.enumerated() {
             let wanted = naturalHeight(step, number: i + 1,
-                                       width: content.width, ceiling: content.height)
+                                       width: content.width, ceiling: content.height,
+                                       strips: strips)
             reserve(wanted)
             let slot = CGRect(x: content.minX, y: max(pen - wanted, content.minY),
                               width: content.width,
@@ -1137,6 +1154,23 @@ extension Export {
     static func copyForEmailAsync(_ guide: Guide) async -> Int {
         let html = await emailHTMLAsync(guide)
         return putOnPasteboard(html, guide: guide)
+    }
+
+    /// Every GIF step's filmstrip, rendered off the main thread, for `pdf`.
+    static func prepareFilmstrips(_ guide: Guide) async -> [UUID: [CGImage]] {
+        let jobs: [(id: UUID, spec: RenderSpec)] = guide.steps.enumerated().compactMap { i, step in
+            let spec = step.renderSpec(number: i + 1)
+            return spec.rendersAsGIF ? (step.id, spec) : nil
+        }
+        guard !jobs.isEmpty else { return [:] }
+        return await Task.detached(priority: .userInitiated) {
+            var out: [UUID: [CGImage]] = [:]
+            for job in jobs {
+                let frames = MediaPreparer.filmstrip(job.spec)
+                if !frames.isEmpty { out[job.id] = frames }
+            }
+            return out
+        }.value
     }
 
     static func markdownAsync(_ guide: Guide, to folder: URL) async throws {

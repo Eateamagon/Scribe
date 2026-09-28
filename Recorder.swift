@@ -69,6 +69,21 @@ final class FnMonitor {
             || CGEventSource.flagsState(.combinedSessionState).contains(.maskSecondaryFn)
     }
 
+    /// Keys macOS stamps with the Fn flag even when Fn itself is not held:
+    /// arrows, Home/End, Page Up/Down, forward delete, Help and F1–F12. Holding
+    /// ↓ to scroll must not start a GIF. Reading key state needs no permission;
+    /// if it ever reads all-false, this simply stops filtering.
+    nonisolated static let flaggedKeys: [CGKeyCode] = [
+        0x7B, 0x7C, 0x7D, 0x7E,                 // ← → ↓ ↑
+        0x73, 0x77, 0x74, 0x79, 0x75, 0x72,     // Home End PgUp PgDn ⌦ Help
+        0x7A, 0x78, 0x63, 0x76, 0x60, 0x61,     // F1–F6
+        0x62, 0x64, 0x65, 0x6D, 0x67, 0x6F,     // F7–F12
+    ]
+
+    nonisolated static func flaggedKeyHeld() -> Bool {
+        flaggedKeys.contains { CGEventSource.keyState(.combinedSessionState, key: $0) }
+    }
+
     var onDown: (() -> Void)?
     var onUp: (() -> Void)?
     /// Every poll, down or not — the GIF recorder samples the pointer here.
@@ -104,7 +119,11 @@ final class FnMonitor {
     }
 
     private func poll() {
-        evaluate(raw: source(), at: ProcessInfo.processInfo.systemUptime)
+        var raw = source()
+        // Only guards the *start* of a hold: once a clip is running, Fn+→ is
+        // a real Fn press and must not end it.
+        if raw, !isDown, Self.flaggedKeyHeld() { raw = false }
+        evaluate(raw: raw, at: ProcessInfo.processInfo.systemUptime)
         onTick?()
     }
 
@@ -380,10 +399,18 @@ final class GifRecorder {
         }
         guard !snap.frames.isEmpty else { return discard("no frames arrived") }
 
-        // No click: the step's picture is how the clip ends.
+        // No click: the step's picture is how the clip ends. A click whose
+        // pre-click frame was missing takes the newest recorded frame from
+        // before it instead — the frame at the end would show the result of
+        // the click under a highlight that says "click here".
         var stillImage = still
-        if stillImage == nil, let last = snap.frames.last {
-            stillImage = Img.readPNG(folder.appendingPathComponent(last.file))
+        if stillImage == nil {
+            let before = clicks.first.flatMap { click in
+                snap.frames.last(where: { $0.time <= click.time })
+            }
+            if let pick = before ?? snap.frames.last {
+                stillImage = Img.readPNG(folder.appendingPathComponent(pick.file))
+            }
         }
         guard let stillImage else { return discard("no still") }
 
