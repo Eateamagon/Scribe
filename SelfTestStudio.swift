@@ -310,7 +310,7 @@ extension AppDelegate {
     /// `cacheDisplay` when this build has no Screen Recording grant, so the
     /// layout can still be looked at.
     @discardableResult
-    private func studioSnapshot(_ window: NSWindow, named: String) async -> Bool {
+    func studioSnapshot(_ window: NSWindow, named: String) async -> Bool {
         let out = URL(fileURLWithPath: Bundle.main.bundlePath)
             .deletingLastPathComponent().appendingPathComponent(named)
         window.displayIfNeeded()

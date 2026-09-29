@@ -1116,7 +1116,7 @@ enum Export {
         }
     }
 
-    private static func escape(_ s: String) -> String {
+    static func escape(_ s: String) -> String {
         s.replacingOccurrences(of: "&", with: "&amp;")
          .replacingOccurrences(of: "<", with: "&lt;")
          .replacingOccurrences(of: ">", with: "&gt;")

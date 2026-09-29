@@ -52,7 +52,7 @@ never asked, switch off **Ask for a Name When Recording** in the menu.
 | `⌃⌥⌘E` | open the guide editor, or bring it back to the front |
 | `⌃⌥⌘G` | open the guide library — every guide you have recorded |
 | hold **Fn** | while recording: record this step as a GIF (let go to finish) |
-| `⌃⌥⌘F` | while recording: start / stop a GIF step without holding Fn |
+| `⌃⌥⌘F` | **Quick GIF**: 3-second countdown, then a GIF step with nothing held; press again to stop. Works any time, recording or not. |
 
 Both are Carbon hotkeys, which need no permissions, so you can always stop a
 recording even if everything else has been refused.
@@ -161,10 +161,17 @@ prompt for its text, and a still screenshot from just before your first click.
 - The pointer and a ripple on each click are drawn into the GIF; switch that
   off in the editor per step, or for new GIFs under **GIF Steps ▸ Show Pointer
   in New GIFs**.
+- **Quick GIF** (⌃⌥⌘F, or **Quick GIF** near the top of the menu): a 3-2-1
+  countdown in the middle of the screen gives you time to get into position —
+  clicks during the countdown are ignored — then it records until you press
+  ⌃⌥⌘F again (or 15 s). It works without a recording running: Scribe records
+  that one GIF step into the current guide and stops. When it finishes, the GIF
+  is **copied to the clipboard** sized for email, ready to ⌘V into Gmail
+  (switch off under **GIF Steps ▸ Copy Quick GIFs to Clipboard**).
 - **The Globe key** normally opens the emoji picker when you let go of it. The
   first time you record, Scribe says so once: set System Settings › Keyboard ›
-  **Press 🌐 key to** → **Do Nothing**, or use **⌃⌥⌘F** to start and stop a GIF
-  instead of holding Fn.
+  **Press 🌐 key to** → **Do Nothing**, or use **Quick GIF** instead of holding
+  Fn.
 
 Only steps recorded with Fn have footage. In the editor they can be flipped
 between **GIF** and **Screenshot** at any time; the choice decides what the

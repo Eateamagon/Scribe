@@ -72,7 +72,7 @@ which would pick up stray scripts). Top-level entry code stays in `main.swift`.
 | `Core.swift` | `Diag`, `Geo`, `CaptureScope`/`Settings`, `Img`, `Redaction`, `Markup`, `Annotator`, `GuideStep`, `Guide` |
 | `Media.swift` | GIF clip model, `RenderSpec`, `FrameRenderer`, `PointerOverlay`, key frames, the GIF89a encoder, `MediaPreparer` |
 | `Capture.swift` | `Capture`/`DisplayStreamOutput`, `AXInspector`, prompt box, guide-name panel |
-| `Recorder.swift` | `FnMonitor`, `GifRecorder`, recording HUD, Globe-key notice |
+| `Recorder.swift` | `FnMonitor`, `GifRecorder`, recording HUD, Quick GIF countdown, Globe-key notice |
 | `Export.swift` | `ExportTheme`, `Export` (HTML, email, Markdown, PDF + filmstrips, async doorways) |
 | `Editor.swift` | `MarkupCanvas`, transport/trim views, `ClipPlayer`, the studio `EditorWindowController`, library |
 | `SelfTest*.swift` | `extension AppDelegate` self-tests and window photographs |
@@ -739,6 +739,25 @@ A no-click hold under 0.7 s is discarded as a brush of the key. 15 s cap.
 The HUD is Scribe's own window, so the app-level capture exclusion keeps it
 out of the footage.
 
+### Quick GIF: countdown, toggle mode, optional session
+
+⌃⌥⌘F / the menu item start a `GifCountdown` (3 s, click-through, excluded from
+capture like every Scribe window); clicks during it are dropped. At zero,
+`beginClip()` runs with `gifToggleMode = true`, so Fn is ignored and every click
+goes to the clip until ⌃⌥⌘F again or the cap. With no recording running,
+`quickSession` starts one just for the clip and `endClip` ends it with
+`stopRecording(keepPrompt: true)` — without that flag the step's prompt would
+be committed empty the instant it appeared. `stopRecording` clears
+`quickSession` first so its own `endClip` call cannot recurse.
+
+A finished Quick GIF is copied to the clipboard (`Settings.copyQuickGifs`,
+default on) at the email preset, as three flavours on one item: GIF data, a
+file URL to `gif-NNN/clipboard.gif`, and an `<img>` data URI. Which one a
+Gmail compose window takes — and whether it stays animated — is unverified.
+`AppDelegate.clipboardItem` is separate so the self-test inspects it without
+overwriting the real clipboard. The `--shot-*` `capture(window:)` helper
+terminates the app when done — use `studioSnapshot` inside a self-test.
+
 ### "Record Clicks" gates steps on a held key
 
 `Settings.clickGate` (`ClickGate`): every click, or only clicks with Right
@@ -974,4 +993,8 @@ No automated tests; verification is the two self-tests plus a manual pass:
     clicks make no step (one "Not recorded" flash), Right-Option clicks do, and
     their text reads "Click …", not "Option-click …". Left Option alone does
     not count.
-21. `scribe.log` has no `FAILED` lines.
+21. ⌃⌥⌘F with nothing recording: 3-2-1 countdown, clicks during it ignored,
+    then a GIF until ⌃⌥⌘F; one step, one prompt, recording stops again, and
+    ⌘V into a Gmail compose window pastes the GIF (record whether it animates).
+    ⌃⌥⌘F during the countdown cancels.
+22. `scribe.log` has no `FAILED` lines.

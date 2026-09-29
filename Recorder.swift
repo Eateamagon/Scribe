@@ -32,6 +32,13 @@ extension Settings {
         set { UserDefaults.standard.set(newValue, forKey: "gifShowPointer") }
     }
 
+    /// Whether a finished Quick GIF also goes on the clipboard, ready to paste
+    /// into an email. On by default — it is what the Quick GIF was asked for.
+    var copyQuickGifs: Bool {
+        get { UserDefaults.standard.object(forKey: "gifCopyQuick") as? Bool ?? true }
+        set { UserDefaults.standard.set(newValue, forKey: "gifCopyQuick") }
+    }
+
     /// The Globe-key notice is shown once, ever.
     var globeNoticeShown: Bool {
         get { UserDefaults.standard.bool(forKey: "gifGlobeNoticeShown") }
@@ -595,6 +602,114 @@ final class GifHUD {
             .font: NSFont.monospacedDigitSystemFont(ofSize: 13, weight: .semibold),
         ]))
         return out
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MARK: - Quick GIF countdown
+//
+// "3, 2, 1" in the middle of the screen the pointer is on, so there is time to
+// get the pointer and the window where the demo starts. Scribe's own windows
+// never reach the capture, and it is gone before the clip's first frame anyway.
+// Click-through, never key: the setting-up clicks go to the app underneath.
+// ─────────────────────────────────────────────────────────────────────────────
+
+@MainActor
+final class GifCountdown {
+    private let panel: NSPanel
+    private let number = NSTextField(labelWithString: "")
+    private var timer: Timer?
+    private var remaining = 0
+    private var done: (() -> Void)?
+
+    /// Seconds per count. Only the self-test changes it.
+    var tick: TimeInterval = 1
+
+    private static let size = NSSize(width: 150, height: 150)
+
+    var isRunning: Bool { timer != nil }
+    /// For the self-test's photograph.
+    var window: NSWindow { panel }
+
+    init() {
+        panel = NSPanel(contentRect: NSRect(origin: .zero, size: GifCountdown.size),
+                        styleMask: [.borderless, .nonactivatingPanel],
+                        backing: .buffered, defer: true)
+        panel.isFloatingPanel = true
+        panel.level = .statusBar
+        panel.hidesOnDeactivate = false
+        panel.ignoresMouseEvents = true
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
+        panel.hasShadow = true
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary,
+                                    .ignoresCycle, .stationary]
+
+        // A solid dark disc, not a material: over a light desktop the HUD
+        // material came out light grey behind a white number — unreadable at
+        // a glance, which is the only way a countdown gets read.
+        let blur = NSView(frame: NSRect(origin: .zero, size: GifCountdown.size))
+        blur.wantsLayer = true
+        blur.layer?.backgroundColor = NSColor(calibratedWhite: 0.08, alpha: 0.88).cgColor
+        blur.layer?.cornerRadius = GifCountdown.size.width / 2
+        blur.layer?.masksToBounds = true
+        blur.layer?.borderWidth = 3
+        blur.layer?.borderColor = NSColor(calibratedRed: 0.98, green: 0.45, blue: 0.10, alpha: 1).cgColor
+        panel.contentView = blur
+        // No fade: each number has to be on screen the instant it changes.
+        panel.animationBehavior = .none
+
+        number.font = .monospacedDigitSystemFont(ofSize: 64, weight: .bold)
+        number.textColor = .white
+        number.alignment = .center
+        let caption = NSTextField(labelWithString: "GIF")
+        caption.font = .systemFont(ofSize: 12, weight: .semibold)
+        caption.textColor = NSColor(calibratedRed: 0.98, green: 0.45, blue: 0.10, alpha: 1)
+        caption.alignment = .center
+        let stack = NSStackView(views: [number, caption])
+        stack.orientation = .vertical
+        stack.spacing = -4
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        blur.addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.centerXAnchor.constraint(equalTo: blur.centerXAnchor),
+            stack.centerYAnchor.constraint(equalTo: blur.centerYAnchor),
+        ])
+    }
+
+    /// Counts down from `seconds`, then calls `done` — after the panel is
+    /// already off screen.
+    func start(seconds: Int, on screen: NSScreen?, done: @escaping () -> Void) {
+        cancel()
+        remaining = max(seconds, 1)
+        self.done = done
+        let frame = (screen ?? NSScreen.main ?? NSScreen.screens.first)?.visibleFrame
+            ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
+        panel.setFrameOrigin(NSPoint(x: frame.midX - GifCountdown.size.width / 2,
+                                     y: frame.midY - GifCountdown.size.height / 2))
+        number.stringValue = "\(remaining)"
+        panel.orderFrontRegardless()
+        let t = Timer(timeInterval: tick, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.step() }
+        }
+        // `.common`, so a menu held open does not stall the count.
+        RunLoop.main.add(t, forMode: .common)
+        timer = t
+    }
+
+    func cancel() {
+        timer?.invalidate()
+        timer = nil
+        done = nil
+        panel.orderOut(nil)
+    }
+
+    private func step() {
+        remaining -= 1
+        guard remaining <= 0 else { number.stringValue = "\(remaining)"; return }
+        let finish = done
+        cancel()
+        finish?()
     }
 }
 

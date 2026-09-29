@@ -36,6 +36,7 @@ extension AppDelegate {
         exerciseRecorder(on: screen, check)
 
         Task { @MainActor in
+            await self.exerciseQuickGif(check)
             await self.exerciseGifExports(check)
             if CommandLine.arguments.contains("--live") { await self.exerciseLiveClip() }
             Diag.log(failures.isEmpty
@@ -43,6 +44,54 @@ extension AppDelegate {
                      : "SELFTEST-GIF FAILED: \(failures.count) check(s) — first: \(failures[0])")
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { NSApp.terminate(nil) }
         }
+    }
+
+    /// Quick GIF: the countdown fires once after its count and not at all
+    /// when cancelled; the clipboard item a finished Quick GIF produces
+    /// carries the GIF, a file URL to it and an <img>, and fits the email
+    /// budget. Built, not written — the real clipboard is left alone.
+    private func exerciseQuickGif(_ check: (Bool, String) -> Void) async {
+        let countdown = GifCountdown()
+        countdown.tick = 0.05
+        var fired = 0
+        countdown.start(seconds: 3, on: NSScreen.screens.first) { fired += 1 }
+        check(countdown.isRunning, "the countdown is running after start")
+        try? await Task.sleep(nanoseconds: 400_000_000)
+        check(fired == 1 && !countdown.isRunning, "the countdown fired once (\(fired))")
+
+        // A slow one to photograph, on its first number.
+        let photo = GifCountdown()
+        photo.tick = 5
+        photo.start(seconds: 3, on: NSScreen.screens.first) {}
+        await studioSnapshot(photo.window, named: "countdown-shot.png")
+        photo.cancel()
+
+        var cancelledFired = false
+        countdown.start(seconds: 3, on: NSScreen.screens.first) { cancelledFired = true }
+        countdown.cancel()
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        check(!cancelledFired, "a cancelled countdown does not start a GIF")
+
+        let g = Guide()
+        guard let step = Self.appendSyntheticGifStep(to: g), let folder = step.clipFolderURL,
+              let gif = await MediaPreparer.gifAsync(step.renderSpec(number: 1),
+                                                     preset: Export.emailGIFPreset)
+        else { check(false, "a GIF for the clipboard"); return }
+        let file = folder.appendingPathComponent("clipboard.gif")
+        try? gif.write(to: file)
+        let item = Self.clipboardItem(gif: gif, file: file, alt: step.displayText)
+        let gifType = NSPasteboard.PasteboardType(UTType.gif.identifier)
+        let frames = item.data(forType: gifType)
+            .flatMap { CGImageSourceCreateWithData($0 as CFData, nil) }
+            .map(CGImageSourceGetCount) ?? 0
+        let html = item.string(forType: .html) ?? ""
+        Diag.log("SELFTEST-GIF: quick GIF clipboard — \(gif.count / 1024) KB, \(frames) frames, "
+                 + "types \(item.types.map(\.rawValue))")
+        check(frames > 1, "the clipboard GIF is animated")
+        check(item.string(forType: .fileURL) == file.absoluteString
+              && FileManager.default.fileExists(atPath: file.path), "the clipboard file URL")
+        check(html.hasPrefix("<img") && html.contains("data:image/gif;base64,"), "the clipboard <img>")
+        check(gif.count <= Export.emailBudget.perGIF, "the clipboard GIF fits the email budget")
     }
 
     /// The Fn debounce on invented times: a proper hold, a brush of the key,

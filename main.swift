@@ -104,7 +104,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var lastClickAt = Date.distantPast
     var lastClickPoint = CGPoint.zero
 
-    /// GIF steps: Fn held (or ⌃⌥⌘F toggled) records one step as footage.
+    /// GIF steps: Fn held (or a Quick GIF, ⌃⌥⌘F) records one step as footage.
     let fnMonitor = FnMonitor()
     let gifRecorder = GifRecorder()
     let gifHUD = GifHUD()
@@ -115,6 +115,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// The 15 s cap ended a clip while Fn was still held. Until Fn comes up,
     /// Fn-clicks are ordinary steps rather than the start of another clip.
     var fnCapped = false
+    /// Quick GIF: ⌃⌥⌘F or the menu — a countdown, then a clip with no key held.
+    let gifCountdown = GifCountdown()
+    /// The recording was started only to take one Quick GIF, and stops when
+    /// that clip is done.
+    var quickSession = false
+    static let quickCountdown = 3
+
     /// Clicks dropped this recording because the Record Clicks key was not held.
     var ignoredClicks = 0
 
@@ -154,7 +161,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // ⌃⌥⌘F starts and stops a GIF step, for a Mac where holding Fn is
         // unreliable or already means something. HotKeyCenter fires on main.
         HotKeyCenter.shared.register(keyCode: 3, modifiers: mods) { [weak self] in  // F
-            MainActor.assumeIsolated { self?.toggleGifRecording() }
+            MainActor.assumeIsolated { self?.quickGif() }
         }
 
         if CommandLine.arguments.contains("--probe-fn") { probeFn() }
@@ -247,7 +254,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         ignoredClicks = 0
         fnMonitor.start()
         let gate = Settings.shared.clickGate
-        if gate != .off {
+        if gate != .off, !quickSession {
             gifHUD.flash(gate.hint, on: Geo.screen(containing: NSEvent.mouseLocation), for: 2.5)
         }
 
@@ -256,8 +263,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         globeNotice.showIfNeeded()
     }
 
-    func stopRecording(openEditor showEditor: Bool) {
+    /// `keepPrompt` leaves an open step prompt alone — a Quick GIF session
+    /// ends the moment its clip does, while its prompt is still being typed in.
+    func stopRecording(openEditor showEditor: Bool, keepPrompt: Bool = false) {
         guard isRecording else { return }
+        // Cleared first: `endClip` below must not try to end the session again.
+        quickSession = false
+        gifCountdown.cancel()
         // A clip in progress becomes its step before anything shuts down —
         // the capture stream included, since the clip's last frame comes from
         // it. No prompt: the recording is ending and the editor is next.
@@ -267,7 +279,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         fnCapped = false
         gifHUD.hide()
         isRecording = false
-        prompt.commitCurrent()
+        if !keepPrompt { prompt.commitCurrent() }
 
         if let monitor = mouseMonitor { NSEvent.removeMonitor(monitor) }
         mouseMonitor = nil
@@ -286,6 +298,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// prompt box does not become a step.
     func handleClick(_ event: NSEvent) {
         guard isRecording else { return }
+        // Clicks during a Quick GIF countdown are setting up the demo.
+        if gifCountdown.isRunning { return }
         // Fn-held clicks are already deliberate, so GIF clips skip the gate.
         if routeToClip(event) { return }
         // The event's own flags, or the live state in case they lag a frame.
@@ -467,13 +481,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     /// ⌃⌥⌘F: the same clip as holding Fn, started and stopped by the hotkey.
-    @objc func toggleGifRecording() {
-        guard isRecording else {
-            Diag.log("GIF: ⌃⌥⌘F ignored — not recording")
+    /// Quick GIF (⌃⌥⌘F or the menu): a 3 s countdown, then a clip that runs
+    /// without Fn until ⌃⌥⌘F again or the 15 s cap. Pressing it during the
+    /// countdown cancels. Works without a recording in progress: one is
+    /// started for the clip and stopped when it ends, leaving one GIF step.
+    @objc func quickGif() {
+        if gifCountdown.isRunning {
+            gifCountdown.cancel()
+            Diag.log("GIF: quick GIF countdown cancelled")
+            if quickSession { stopRecording(openEditor: false) }
+            refreshStatusItem()
             return
         }
         if gifRecorder.isRecording { endClip(); return }
-        gifToggleMode = beginClip()
+
+        if !isRecording {
+            // No name prompt: it would eat the countdown. A dated name beats
+            // "Untitled Guide" in the library, and it can be renamed later.
+            if guide.isEmpty, guide.title == "Untitled Guide" { guide.title = Self.suggestedName() }
+            quickSession = true
+            startRecording()
+        }
+        let screen = Geo.screen(containing: NSEvent.mouseLocation)
+        Diag.log("GIF: quick GIF countdown started")
+        gifCountdown.start(seconds: Self.quickCountdown, on: screen) { [weak self] in
+            self?.quickCountdownFinished()
+        }
+        refreshStatusItem()
+    }
+
+    private func quickCountdownFinished() {
+        guard isRecording else { return }
+        if beginClip() {
+            gifToggleMode = true
+        } else {
+            gifHUD.flash("GIF did not start — see the log", on: Geo.screen(containing: NSEvent.mouseLocation))
+            if quickSession { stopRecording(openEditor: false) }
+        }
+        refreshStatusItem()
     }
 
     /// The region is decided NOW, from what is under the pointer — the same
@@ -534,9 +579,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let screen = Geo.screen(containing: NSEvent.mouseLocation)
         let finalFrame = capture.frame(for: gifRecorder.displayID)
         let result = gifRecorder.finish(finalFrame: finalFrame)
+        // Toggle mode means this clip came from Quick GIF, not an Fn hold.
+        let wasQuick = gifToggleMode
         gifToggleMode = false
         if let flash { gifHUD.flash(flash, on: screen) } else { gifHUD.hide() }
         defer { refreshStatusItem() }
+
+        // A Quick GIF session exists for this one clip. Ended after the step
+        // and its prompt are up; `keepPrompt` lets the prompt outlive it.
+        defer { if quickSession { stopRecording(openEditor: false, keepPrompt: true) } }
 
         guard let result else { removeGuideFolderIfUnused(); return }
         guard let step = guide.appendGif(number: result.number, still: result.still,
@@ -550,6 +601,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         lastStep = nil
         lastClickAt = .distantPast
         library?.reload()
+        if wasQuick, Settings.shared.copyQuickGifs { copyGifToClipboard(step, on: screen) }
 
         guard presentPrompt else { return }
         prompt.present(number: guide.count,
@@ -620,10 +672,81 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         lastClickPoint = point
     }
 
+    /// Puts a GIF step on the clipboard for pasting into Gmail: sized with
+    /// the email preset (600 px, budgeted), encoded off the main thread.
+    ///
+    /// Three flavours, because which one a compose window takes is up to the
+    /// browser: the GIF itself, a file URL to a copy of it (what Finder's Copy
+    /// puts there, which Chrome and Safari paste into Gmail as an inline
+    /// image), and an `<img>` for anything that only reads HTML. Which one
+    /// Gmail actually uses — and whether it stays animated — needs a human.
+    func copyGifToClipboard(_ step: GuideStep, on screen: NSScreen?) {
+        guard let index = guide.steps.firstIndex(where: { $0 === step }),
+              let folder = step.clipFolderURL else { return }
+        let spec = step.renderSpec(number: index + 1)
+        gifHUD.flash("Copying GIF…", on: screen, for: 10)
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            let started = Date()
+            guard let gif = await MediaPreparer.gifAsync(spec, preset: Export.emailGIFPreset) else {
+                // Over the email budget even after shrinking: say so rather
+                // than leaving yesterday's clipboard in place silently.
+                Diag.log("GIF: quick GIF too large for email — not copied")
+                self.gifHUD.flash("GIF too long for email — shorten it in the editor", on: screen)
+                return
+            }
+            let file = folder.appendingPathComponent("clipboard.gif")
+            try? gif.write(to: file, options: .atomic)
+            let item = Self.clipboardItem(gif: gif, file: file, alt: step.displayText)
+            let board = NSPasteboard.general
+            board.clearContents()
+            board.writeObjects([item])
+            Diag.log(String(format: "GIF: quick GIF copied to the clipboard — %d KB, %.2f s",
+                            gif.count / 1024, Date().timeIntervalSince(started)))
+            self.gifHUD.flash("GIF copied — paste into Gmail with ⌘V", on: screen, for: 3)
+        }
+    }
+
+    /// The pasteboard item for a copied GIF, separate so the self-test can
+    /// check it without touching the real clipboard.
+    static func clipboardItem(gif: Data, file: URL, alt: String) -> NSPasteboardItem {
+        let width = Export.pixelWidth(of: gif) ?? 600
+        let html = "<img width=\"\(width)\" alt=\"\(Export.escape(alt))\" "
+            + "src=\"data:image/gif;base64,\(gif.base64EncodedString())\">"
+        let item = NSPasteboardItem()
+        item.setData(gif, forType: NSPasteboard.PasteboardType(UTType.gif.identifier))
+        item.setString(file.absoluteString, forType: .fileURL)
+        item.setString(html, forType: .html)
+        return item
+    }
+
+    @objc func toggleCopyQuickGifs() {
+        Settings.shared.copyQuickGifs.toggle()
+        Diag.log("copy quick GIFs to clipboard = \(Settings.shared.copyQuickGifs)")
+        refreshStatusItem()
+    }
+
     @objc func toggleShowPointerInGifs() {
         Settings.shared.showPointerInNewGifs.toggle()
         Diag.log("show pointer in new GIFs = \(Settings.shared.showPointerInNewGifs)")
         refreshStatusItem()
+    }
+
+    /// "Quick GIF" / "Stop GIF" / "Cancel GIF Countdown" — the same ⌃⌥⌘F item
+    /// at the top of the menu and in GIF Steps ▸.
+    func quickGifItem() -> NSMenuItem {
+        let title = gifCountdown.isRunning ? "Cancel GIF Countdown"
+            : gifRecorder.isRecording ? "Stop GIF"
+            : "Quick GIF (\(Self.quickCountdown) s countdown)"
+        let item = NSMenuItem(title: title, action: #selector(quickGif), keyEquivalent: "f")
+        item.keyEquivalentModifierMask = [.control, .option, .command]
+        item.target = self
+        item.toolTip = isRecording
+            ? "Counts down \(Self.quickCountdown) s, then records a GIF step without holding Fn. "
+              + "⌃⌥⌘F again to stop."
+            : "Counts down \(Self.quickCountdown) s, then records one GIF step into “\(guide.title)” — "
+              + "no recording needed. ⌃⌥⌘F again to stop."
+        return item
     }
 
     /// "GIF Steps ▸" in the status menu.
@@ -634,16 +757,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         submenu.addItem(disabled("Release Fn to finish — \(Int(GifRecorder.maxDuration)) s at most"))
         submenu.addItem(.separator())
 
-        let toggle = NSMenuItem(title: gifRecorder.isRecording ? "Stop GIF Recording"
-                                                               : "Toggle GIF Recording",
-                                action: #selector(toggleGifRecording), keyEquivalent: "f")
-        toggle.keyEquivalentModifierMask = [.control, .option, .command]
-        toggle.target = self
-        toggle.isEnabled = isRecording
-        toggle.toolTip = isRecording
-            ? "Start or stop a GIF step without holding Fn."
-            : "Available while recording."
-        submenu.addItem(toggle)
+        submenu.addItem(quickGifItem())
+        let copy = NSMenuItem(title: "Copy Quick GIFs to Clipboard",
+                              action: #selector(toggleCopyQuickGifs), keyEquivalent: "")
+        copy.target = self
+        copy.state = Settings.shared.copyQuickGifs ? .on : .off
+        copy.toolTip = "When a Quick GIF finishes, put it on the clipboard sized for email, "
+            + "ready to paste into Gmail."
+        submenu.addItem(copy)
 
         let pointer = NSMenuItem(title: "Show Pointer in New GIFs",
                                  action: #selector(toggleShowPointerInGifs), keyEquivalent: "")
@@ -808,7 +929,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             : isRecording
                 ? (sawFirstFrame ? " \(guide.count)" : " …")
                 : (guide.isEmpty ? "" : " \(guide.count)")
-        button.toolTip = clip ? "Scribe is recording a GIF step — release Fn (or ⌃⌥⌘F) to finish"
+        button.toolTip = clip ? (gifToggleMode ? "Scribe is recording a GIF step — ⌃⌥⌘F to finish"
+                         : "Scribe is recording a GIF step — release Fn to finish")
             : isRecording ? "Scribe is recording — ⌃⌥⌘R to stop"
                 + (Settings.shared.clickGate == .off ? "" : " · \(Settings.shared.clickGate.hint)")
                           : "Scribe — ⌃⌥⌘R to record"
@@ -827,6 +949,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if isRecording && !sawFirstFrame {
             menu.addItem(disabled("   Waiting for the first screen frame…"))
         }
+        menu.addItem(quickGifItem())
 
         let edit = NSMenuItem(title: "Open Guide Editor…",
                               action: #selector(openEditor), keyEquivalent: "e")
