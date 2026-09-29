@@ -205,6 +205,7 @@ extension AppDelegate {
                     self?.exerciseEditor()
                     self?.exerciseFileNumbering()
                     self?.exerciseClickGate()
+                    self?.exerciseBrowserPage()
                     Diag.log("SELFTEST-OFFLINE PASSED — \(self?.guide.folder.path ?? "")")
                 }
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { NSApp.terminate(nil) }
@@ -825,6 +826,56 @@ extension AppDelegate {
                                elementLabel: "New Folder", verb: "Click",
                                clip: GifClip(folder: folderName, trimStart: trim.start,
                                              trimEnd: trim.end))
+    }
+
+    /// `--probe-browser`: does page detection work in the browsers open right
+    /// now? Logs sizes and the height of the chrome above the page — nothing
+    /// that could name a page or an account.
+    func probeBrowser() {
+        let found = AXInspector.probeBrowserPages()
+        if found.isEmpty { Diag.log("PROBE-BROWSER: no browser window found (or no Accessibility)") }
+        for b in found {
+            if let page = b.page {
+                Diag.log(String(format: "PROBE-BROWSER %@: window %.0fx%.0f, page %.0fx%.0f, "
+                                + "chrome above the page %.0f pt, below %.0f pt",
+                                b.bundleID, b.window.width, b.window.height, page.width, page.height,
+                                page.minY - b.window.minY, b.window.maxY - page.maxY))
+            } else {
+                Diag.log(String(format: "PROBE-BROWSER %@: window %.0fx%.0f, no web page found",
+                                b.bundleID, b.window.width, b.window.height))
+            }
+        }
+        NSApp.terminate(nil)
+    }
+
+    /// Browser page rects on a step: recorded, cropped when asked, not
+    /// cropped for a click on the chrome, and switchable afterwards.
+    func exerciseBrowserPage() {
+        guard let frame = Self.syntheticFrame() else { return }
+        let g = Guide()
+        let page = CGRect(x: 0, y: 0.12, width: 1, height: 0.88)
+        var ok = true
+        for (click, crop) in [(CGPoint(x: 0.5, y: 0.5), true), (CGPoint(x: 0.3, y: 0.05), true),
+                              (CGPoint(x: 0.5, y: 0.5), false)] {
+            g.append(image: frame, click: click, target: nil, appName: "Google Chrome",
+                     windowTitle: "", elementLabel: "", verb: "Click")
+            g.setPage(page, crop: crop, click: click, at: g.count - 1)
+        }
+        ok = ok && g.steps[0].hidesBrowserChrome && g.steps[0].crop != nil   // inside the page
+        ok = ok && g.steps[1].crop == nil && g.steps[1].pageRect != nil      // click on a tab
+        ok = ok && g.steps[2].crop == nil && g.steps[2].pageRect != nil      // setting off
+        g.setHidesBrowserChrome(true, at: 2)
+        ok = ok && g.steps[2].hidesBrowserChrome
+        g.setHidesBrowserChrome(false, at: 0)
+        ok = ok && g.steps[0].crop == nil
+        let reloaded = Guide()
+        reloaded.load(from: g.folder)
+        ok = ok && reloaded.steps.count == 3 && reloaded.steps[1].pageRect != nil
+            && reloaded.steps[2].hidesBrowserChrome
+        let still = g.steps[2].annotated(number: 3)
+        ok = ok && still.map { abs(CGFloat($0.height) / CGFloat(frame.height) - 0.88) < 0.01 } ?? false
+        Diag.log("SELFTEST-OFFLINE: browser page crop \(ok ? "correct" : "FAILED")")
+        if !ok { Diag.log("SELFTEST-OFFLINE FAILED: browser page crop") }
     }
 
     // MARK: Fn probe

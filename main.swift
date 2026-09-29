@@ -165,6 +165,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         if CommandLine.arguments.contains("--probe-fn") { probeFn() }
+        else if CommandLine.arguments.contains("--probe-browser") { probeBrowser() }
         else if CommandLine.arguments.contains("--selftest-media") { runMediaSelfTest() }
         else if CommandLine.arguments.contains("--selftest-gif") { runRecorderSelfTest() }
         else if CommandLine.arguments.contains("--shot-studio") { shotStudio() }
@@ -375,6 +376,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                                       elementLabel: target.label,
                                       verb: verb)
         else { return }
+        if let page = target.pageFrame {
+            guide.setPage(Geo.normalize(localRect: Geo.localRect(axRect: page, on: screen), in: region),
+                          crop: Settings.shared.hideBrowserChrome, click: normClick,
+                          at: guide.count - 1)
+        }
 
         lastStep = step
         lastClickAt = Date()
@@ -598,6 +604,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                                          clip: result.clip,
                                          showHighlight: result.showHighlight)
         else { return }
+        if let page = result.pageRect {
+            guide.setPage(page, crop: Settings.shared.hideBrowserChrome,
+                          click: result.data.clicks.first?.point, at: guide.count - 1)
+        }
         lastStep = nil
         lastClickAt = .distantPast
         library?.reload()
@@ -992,6 +1002,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         menu.addItem(.separator())
         menu.addItem(buildCaptureScopeItem())
+        let chrome = NSMenuItem(title: "Hide Browser Tabs & Address Bar",
+                                action: #selector(toggleHideBrowserChrome), keyEquivalent: "")
+        chrome.target = self
+        chrome.state = Settings.shared.hideBrowserChrome ? .on : .off
+        chrome.toolTip = "Crop steps in Chrome, Safari, Edge, Brave, Arc or Firefox to the web page. "
+            + "Clicks on a tab or the address bar keep the whole window. "
+            + "Each step can be switched back in the editor."
+        menu.addItem(chrome)
         menu.addItem(buildClickGateItem())
         menu.addItem(buildGifItem())
 
@@ -1053,6 +1071,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         submenu.addItem(disabled("Holding Fn for a GIF step always records."))
         item.submenu = submenu
         return item
+    }
+
+    @objc func toggleHideBrowserChrome() {
+        Settings.shared.hideBrowserChrome.toggle()
+        Diag.log("hide browser chrome = \(Settings.shared.hideBrowserChrome)")
+        refreshStatusItem()
     }
 
     @objc func setClickGate(_ sender: NSMenuItem) {

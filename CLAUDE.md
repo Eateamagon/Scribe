@@ -38,6 +38,7 @@ open Scribe.app --args --selftest-media     # renderer, crop, spotlight, GIF enc
 open Scribe.app --args --selftest-gif       # GIF recorder (synthetic) + GIF-aware exports
 open Scribe.app --args --shot-studio        # synthetic guide with a GIF step, editor photographed
 open Scribe.app --args --probe-fn           # 20 s log of every Fn signal — a human holds Fn
+open Scribe.app --args --probe-browser      # page vs window size in each open browser
 ```
 
 For tests, prefer running the binary directly with the data root redirected,
@@ -758,6 +759,25 @@ Gmail compose window takes — and whether it stays animated — is unverified.
 overwriting the real clipboard. The `--shot-*` `capture(window:)` helper
 terminates the app when done — use `studioSnapshot` inside a self-test.
 
+### Browser chrome is hidden with a crop, found through Accessibility
+
+For clicks in a known browser (`AXInspector.browsers` — not Electron apps,
+whose web area is the whole app), `ClickTarget.pageFrame` is the outermost
+`AXWebArea` above the clicked element (iframes are web areas too), clipped to
+its parent `AXScrollArea` (Safari's web area is the whole document, not the
+viewport) and to the window. A click on the chrome has no web area above it,
+so the window's own tree is searched breadth-first, capped at 400 nodes and
+never descending into a web area. Probing a screen point instead would hit
+whatever window is on top.
+
+The page is stored on every browser step as `GuideStep.pageRect`, normalised
+like everything else, and "hiding" it is just `crop = pageRect`
+(`Guide.setPage` / `setHidesBrowserChrome`). So it is retroactive, per step,
+non-destructive, and works for GIF frames with no extra code. A click outside
+the page keeps the whole window. `--probe-browser` logs window and page sizes
+for every open browser (sizes only, never titles). Measured on this Mac:
+Chrome 1728×998 window, page 1728×911, 87 pt of chrome above.
+
 ### "Record Clicks" gates steps on a held key
 
 `Settings.clickGate` (`ClickGate`): every click, or only clicks with Right
@@ -997,4 +1017,7 @@ No automated tests; verification is the two self-tests plus a manual pass:
     then a GIF until ⌃⌥⌘F; one step, one prompt, recording stops again, and
     ⌘V into a Gmail compose window pastes the GIF (record whether it animates).
     ⌃⌥⌘F during the countdown cancels.
-22. `scribe.log` has no `FAILED` lines.
+22. **Hide Browser Tabs & Address Bar** on, click inside a Chrome page: the step
+    shows only the page. Click a tab: the whole window. The editor checkbox
+    switches either one. `--probe-browser` reports a page for each open browser.
+23. `scribe.log` has no `FAILED` lines.

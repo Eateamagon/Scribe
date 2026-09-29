@@ -328,6 +328,13 @@ final class Settings {
         set { defaults.set(newValue.id, forKey: "exportTheme") }
     }
 
+    /// Crop browser steps to the web page, leaving out the tabs and address
+    /// bar. Off by default; each step can still be switched in the editor.
+    var hideBrowserChrome: Bool {
+        get { defaults.bool(forKey: "hideBrowserChrome") }
+        set { defaults.set(newValue, forKey: "hideBrowserChrome") }
+    }
+
     /// Every click is a step unless the user has chosen a key to hold.
     var clickGate: ClickGate {
         get { ClickGate(rawValue: defaults.string(forKey: "clickGate") ?? "") ?? .off }
@@ -1116,6 +1123,18 @@ final class GuideStep {
     /// The screenshot file the step was recorded with, kept when "Use as
     /// still" or "Replace image" points `imageURL` at a new file.
     var originalImageName: String?
+    /// In a browser step: where the web page sits in the picture (0…1,
+    /// top-left, like `crop`), so its tabs and address bar can be cropped off
+    /// now or later. Nil for anything that is not a browser page.
+    var pageRect: CGRect?
+
+    /// Whether the browser bar is currently cropped off — i.e. the crop is
+    /// the page. A crop the user drew themselves is not this.
+    var hidesBrowserChrome: Bool {
+        guard let crop, let pageRect else { return false }
+        return abs(crop.minX - pageRect.minX) < 0.002 && abs(crop.minY - pageRect.minY) < 0.002
+            && abs(crop.width - pageRect.width) < 0.002 && abs(crop.height - pageRect.height) < 0.002
+    }
 
     var hasFootage: Bool { gif != nil }
     var isGIF: Bool { media == .gif && gif != nil }
@@ -1359,6 +1378,7 @@ final class GuideStep {
         if let crop { d["crop"] = RectCoding.dictionary(crop) }
         if let spotlight { d["spotlight"] = spotlight.dictionary }
         if let originalImageName { d["originalImage"] = originalImageName }
+        if let pageRect { d["page"] = RectCoding.dictionary(pageRect) }
         if let t = target {
             d["targetX"] = t.minX; d["targetY"] = t.minY
             d["targetW"] = t.width; d["targetH"] = t.height
@@ -1394,6 +1414,7 @@ final class GuideStep {
         step.crop = RectCoding.rect(d["crop"])
         step.spotlight = (d["spotlight"] as? [String: Any]).flatMap(Spotlight.from)
         step.originalImageName = d["originalImage"] as? String
+        step.pageRect = RectCoding.rect(d["page"])
         return step
     }
 }
@@ -1795,6 +1816,29 @@ final class Guide {
         steps[index].crop = value
         steps[index].invalidateThumbnail()
         changed(.image, index: index)
+    }
+
+    /// Records where a browser step's page is and, when asked, crops to it.
+    /// `normalized` is already against the step's picture. A click outside the
+    /// page (on a tab, in the address bar) keeps the whole window: cropping
+    /// would cut off the very thing the step is about.
+    func setPage(_ normalized: CGRect?, crop: Bool, click: CGPoint?, at index: Int) {
+        guard steps.indices.contains(index), let page = normalized?
+                .intersection(CGRect(x: 0, y: 0, width: 1, height: 1)),
+              !page.isNull, page.width > 0.2, page.height > 0.2
+        else { return }
+        steps[index].pageRect = page
+        if crop, steps[index].crop == nil, click.map(page.contains) ?? true {
+            setCrop(page, at: index)       // saves and notifies
+        } else {
+            save()
+        }
+    }
+
+    /// The editor's per-step switch. Off takes the crop away entirely.
+    func setHidesBrowserChrome(_ hide: Bool, at index: Int) {
+        guard steps.indices.contains(index), let page = steps[index].pageRect else { return }
+        setCrop(hide ? page : nil, at: index)
     }
 
     func setSpotlight(_ spotlight: Spotlight?, at index: Int) {

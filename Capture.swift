@@ -301,6 +301,9 @@ struct ClickTarget {
     /// The frame of the window the click landed in, same coordinate space.
     /// Nil without Accessibility, or for apps that expose no window chain.
     var windowFrame: CGRect?
+    /// In a browser: the web page's visible area — the window minus its tabs,
+    /// address bar and toolbars. Same coordinate space. Nil anywhere else.
+    var pageFrame: CGRect?
 }
 
 enum AXInspector {
@@ -350,7 +353,106 @@ enum AXInspector {
         let (title, windowRect) = window(from: element)
         out.windowTitle = title
         out.windowFrame = windowRect
+        if browsers.contains(out.bundleID) {
+            out.pageFrame = pageFrame(from: element, window: windowRect)
+        }
         return out
+    }
+
+    private static func windowElement(above element: AXUIElement) -> AXUIElement? {
+        var node: AXUIElement? = element
+        var hops = 0
+        while let current = node, hops < 60 {
+            if string(current, "AXRole" as CFString) == "AXWindow" { return current }
+            node = parent(of: current)
+            hops += 1
+        }
+        return nil
+    }
+
+    /// Breadth-first for the first `AXWebArea` under a window, never looking
+    /// inside one (a page's own tree is thousands of nodes) and capped, so a
+    /// strange window costs a few milliseconds, not a stall.
+    private static func firstWebArea(inside window: AXUIElement) -> AXUIElement? {
+        var queue: [(AXUIElement, Int)] = [(window, 0)]
+        var visited = 0
+        while !queue.isEmpty, visited < 400 {
+            let (node, depth) = queue.removeFirst()
+            visited += 1
+            if string(node, "AXRole" as CFString) == "AXWebArea" { return node }
+            guard depth < 14 else { continue }
+            var value: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(node, "AXChildren" as CFString, &value) == .success,
+                  let children = value as? [AXUIElement] else { continue }
+            queue.append(contentsOf: children.map { ($0, depth + 1) })
+        }
+        return nil
+    }
+
+    /// For `--probe-browser`: window and page frames of each running
+    /// browser's focused window. Sizes only — never titles or URLs.
+    static func probeBrowserPages() -> [(bundleID: String, window: CGRect, page: CGRect?)] {
+        guard isTrusted else { return [] }
+        return NSWorkspace.shared.runningApplications.compactMap { app in
+            guard let id = app.bundleIdentifier, browsers.contains(id) else { return nil }
+            let element = AXUIElementCreateApplication(app.processIdentifier)
+            var value: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(element, "AXFocusedWindow" as CFString, &value) == .success,
+                  let value, CFGetTypeID(value) == AXUIElementGetTypeID()
+            else { return nil }
+            // swiftlint:disable:next force_cast
+            let win = value as! AXUIElement
+            guard let frame = frame(of: win) else { return nil }
+            let page = firstWebArea(inside: win).flatMap { pageFrame(from: $0, window: frame) }
+            return (id, frame, page)
+        }
+    }
+
+    /// Where "hide the tabs and address bar" applies. Only real browsers:
+    /// Electron apps expose a web area too, but there it is the whole app.
+    static let browsers: Set<String> = [
+        "com.google.Chrome", "com.google.Chrome.beta", "com.google.Chrome.dev",
+        "com.google.Chrome.canary", "com.microsoft.edgemac", "com.brave.Browser",
+        "company.thebrowser.Browser", "com.apple.Safari", "com.apple.SafariTechnologyPreview",
+        "org.mozilla.firefox", "com.operasoftware.Opera", "com.vivaldi.Vivaldi",
+    ]
+
+    /// The visible web page inside a browser window: the outermost
+    /// `AXWebArea` above the click (an iframe is a web area too, and the
+    /// outermost one is the page), clipped to its scroll area — Safari's web
+    /// area is the whole document, not the viewport — and to the window.
+    ///
+    /// A click on the chrome itself (a tab, the address bar) has no web area
+    /// above it, so the window's own tree is searched downward instead: the
+    /// page is there even when the click was not. (Probing a point in the
+    /// window would hit whatever other window happens to be on top.)
+    private static func pageFrame(from element: AXUIElement, window: CGRect?) -> CGRect? {
+        func outermostWebArea(above start: AXUIElement) -> AXUIElement? {
+            var node: AXUIElement? = start
+            var found: AXUIElement?
+            var hops = 0
+            while let current = node, hops < 60 {
+                let role = string(current, "AXRole" as CFString)
+                if role == "AXWindow" { break }
+                if role == "AXWebArea" { found = current }
+                node = parent(of: current)
+                hops += 1
+            }
+            return found
+        }
+        var area = outermostWebArea(above: element)
+        if area == nil, let win = windowElement(above: element) {
+            area = firstWebArea(inside: win)
+        }
+        guard let area, var rect = frame(of: area) else { return nil }
+        if let scroll = parent(of: area),
+           string(scroll, "AXRole" as CFString) == "AXScrollArea",
+           let viewport = frame(of: scroll) {
+            rect = rect.intersection(viewport)
+        }
+        if let window { rect = rect.intersection(window) }
+        guard !rect.isNull, rect.width > 80, rect.height > 60 else { return nil }
+        return rect
     }
 
     /// Walks up from the deepest element until something has a usable name.

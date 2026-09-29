@@ -216,6 +216,9 @@ final class GifRecorder {
         var showHighlight: Bool
         var clip: GifClip
         var data: ClipData
+        /// Where the web page sits in the clip, when it was recorded in a
+        /// browser — normalised like everything else on the step.
+        var pageRect: CGRect?
         /// For the log and the self-test.
         var framesDropped: Int
         var msPerFrame: Double
@@ -445,7 +448,12 @@ final class GifRecorder {
                       showHighlight: first != nil,
                       clip: GifClip(folder: folderName, trimStart: trim.start,
                                     trimEnd: trim.end, showPointer: showPointer),
-                      data: data, framesDropped: dropped, msPerFrame: ms)
+                      data: data,
+                      pageRect: who.pageFrame.flatMap { page in
+                          screen.map { Geo.normalize(localRect: Geo.localRect(axRect: page, on: $0),
+                                                     in: region) }
+                      },
+                      framesDropped: dropped, msPerFrame: ms)
     }
 
     /// For the self-test: wait for the frame in flight, as if the stream had

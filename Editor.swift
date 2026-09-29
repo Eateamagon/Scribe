@@ -1490,6 +1490,8 @@ final class EditorWindowController: NSWindowController,
     private let zoomValue = NSTextField(labelWithString: "")
     private var replaceButton = NSPopUpButton()
     private let highlightToggle = NSButton(checkboxWithTitle: "Auto highlight", target: nil, action: nil)
+    private let browserChromeToggle = NSButton(checkboxWithTitle: "Hide browser tabs & address bar",
+                                               target: nil, action: nil)
     private let stylePicker = NSPopUpButton(frame: .zero, pullsDown: false)
     private var coversAllButton = NSButton()
     private var permanentButton = NSButton()
@@ -2185,6 +2187,13 @@ final class EditorWindowController: NSWindowController,
         highlightToggle.toolTip = "The automatic red box or ring. Turn it off when it "
             + "landed on the wrong thing and you have drawn your own."
 
+        browserChromeToggle.target = self
+        browserChromeToggle.action = #selector(toggleBrowserChrome)
+        browserChromeToggle.controlSize = .small
+        browserChromeToggle.font = .systemFont(ofSize: 11)
+        browserChromeToggle.toolTip = "Crop this step to the web page. Only for steps recorded "
+            + "in a browser; switching it off removes the crop."
+
         // Covers
         for style in [RedactionStyle.solid, .pixelate] { stylePicker.addItem(withTitle: style.label) }
         stylePicker.selectItem(at: 0)
@@ -2214,7 +2223,7 @@ final class EditorWindowController: NSWindowController,
             section("Step", [noteFrame, noteHint, contextLabel]),
             section("Media", [mediaControl, clipInfo, pointerToggle]),
             section("Image", [cropRow, smallLabel("Spotlight"), spotlightControl, zoomRow,
-                              replaceButton, highlightToggle]),
+                              replaceButton, highlightToggle, browserChromeToggle]),
             section("Covers", [styleRow, coversAllButton, permanentButton]),
             section("Drawing", [equalRow([undoButton, clearButton])]),
         ]
@@ -3039,6 +3048,8 @@ final class EditorWindowController: NSWindowController,
         zoomValue.stringValue = String(format: "%.1f×", zoom)
         zoomValue.textColor = zoomSlider.isEnabled ? .secondaryLabelColor : .tertiaryLabelColor
         highlightToggle.state = step.showHighlight ? .on : .off
+        browserChromeToggle.isHidden = step.pageRect == nil
+        browserChromeToggle.state = step.hidesBrowserChrome ? .on : .off
 
         coversAllButton.isEnabled = !step.redactions.isEmpty && guide.count > 1
         permanentButton.isEnabled = guide.redactionCount > 0
@@ -3415,6 +3426,11 @@ final class EditorWindowController: NSWindowController,
     @objc private func togglePointer() {
         guard let row = currentRow else { return }
         guide.setShowPointer(pointerToggle.state == .on, at: row)
+    }
+
+    @objc private func toggleBrowserChrome() {
+        guard let row = currentRow else { return }
+        guide.setHidesBrowserChrome(browserChromeToggle.state == .on, at: row)
     }
 
     @objc private func toggleAutoHighlight() {

@@ -65,6 +65,7 @@ The menu also has:
 |---|---|
 | **Ask for a Name When Recording** | Whether starting a new recording prompts for a title. On by default. |
 | **Capture Area ▸** | What ends up in each screenshot. See below. |
+| **Hide Browser Tabs & Address Bar** | In Chrome, Safari, Edge, Brave, Arc and Firefox, crops each step to the web page itself. A click *on* a tab or the address bar keeps the whole window, since that is what the step is about. It is an ordinary crop: the editor's **Hide browser tabs & address bar** checkbox switches it per step, including steps recorded with the option off. |
 | **Record Clicks ▸** | **Every Click** (default), or only clicks made while holding a key you choose — **Right ⌥ Option**, **Right ⌘ Command**, **Right ⇧ Shift** — or while **Caps Lock** is on. Everything else you click is left out of the guide, so closing a pop-up or a mis-click never becomes a step. The app you are recording still sees the key (an Option-click on a browser link downloads it), so pick the one that does least harm in your apps. The key never shows up in the step text. Holding Fn for a GIF step always records. |
 | **New Guide** (`⌃⌥⌘N`) | Starts an empty guide. The current one is saved and stays in the library — nothing is thrown away, so it does not ask. Also a button in the editor and in the library window. |
 | **Reopen Last Guide** | Loads the most recent recording back into the editor — what gets your guide back after quitting. |
