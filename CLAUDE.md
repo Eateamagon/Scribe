@@ -1021,3 +1021,8 @@ No automated tests; verification is the two self-tests plus a manual pass:
     shows only the page. Click a tab: the whole window. The editor checkbox
     switches either one. `--probe-browser` reports a page for each open browser.
 23. `scribe.log` has no `FAILED` lines.
+
+## KeyAtlas bridge
+Global hotkeys are registered by name (`HotKeyCenter.register(id:title:…)`) and published to the
+`KeyAtlasManifest` default, so ~/ClaudeCode/KeyAtlas can list and rebind them. Overrides live at
+`KeyAtlasHotkey.<id>` ({keyCode, modifierFlags}, `{}` = off) and apply at launch. Add new hotkeys the same way.

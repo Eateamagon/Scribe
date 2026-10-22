@@ -73,6 +73,88 @@ final class HotKeyCenter: @unchecked Sendable {
             return noErr
         }, 1, &spec, nil, nil)
     }
+
+    /// Named hotkey that KeyAtlas can list and rebind (see KeyAtlasBridge).
+    func register(id: String, title: String, keyCode: UInt32, modifiers: UInt32, handler: @escaping () -> Void) {
+        KeyAtlasBridge.publish(id: id, title: title, keyCode: Int(keyCode), eventFlags: KeyAtlasBridge.eventFlags(carbon: modifiers))
+        guard let r = KeyAtlasBridge.resolve(id: id, keyCode: Int(keyCode), carbonModifiers: modifiers) else {
+            Diag.log("hotkey \(id): turned off in KeyAtlas")
+            return
+        }
+        if r.keyCode != Int(keyCode) || r.modifiers != modifiers { Diag.log("hotkey \(id): KeyAtlas override keyCode \(r.keyCode) mods \(r.modifiers)") }
+        register(keyCode: UInt32(r.keyCode), modifiers: r.modifiers, handler: handler)
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MARK: - KeyAtlas bridge
+//
+// Lets KeyAtlas (~/ClaudeCode/KeyAtlas) list and rebind these hotkeys, which
+// Carbon otherwise keeps invisible to other apps. Each launch publishes
+// "KeyAtlasManifest" in this app's defaults; KeyAtlas writes overrides to
+// "KeyAtlasHotkey.<id>" as {keyCode, modifierFlags} (NSEvent flag bits), and
+// {} means "turned off". Overrides take effect the next time the app launches.
+// ─────────────────────────────────────────────────────────────────────────────
+
+extension NSMenuItem {
+    /// Shows the ⌃⌥⌘ hotkey this item fires — or KeyAtlas's replacement, or none if it was turned off.
+    func applyHotKey(id: String, keyCode: Int) {
+        let k = KeyAtlasBridge.menuKey(id: id, keyCode: keyCode, carbonModifiers: UInt32(controlKey | optionKey | cmdKey))
+        keyEquivalent = k.key
+        keyEquivalentModifierMask = k.mask
+    }
+}
+
+enum KeyAtlasBridge {
+    private static var publishedThisLaunch = false
+
+    /// Records a shortcut in the manifest. `scope` is "global" (rebindable) or "inApp" (listed only).
+    static func publish(id: String, title: String, keyCode: Int, eventFlags: UInt, scope: String = "global") {
+        let d = UserDefaults.standard
+        var list = publishedThisLaunch ? ((d.array(forKey: "KeyAtlasManifest") as? [[String: Any]]) ?? []) : []
+        publishedThisLaunch = true
+        list.removeAll { ($0["id"] as? String) == id }
+        list.append(["id": id, "title": title, "keyCode": keyCode, "modifierFlags": Int(eventFlags), "scope": scope])
+        d.set(list, forKey: "KeyAtlasManifest")
+    }
+
+    /// The combo to register for `id`: KeyAtlas's override, else the default. nil = turned off.
+    static func resolve(id: String, keyCode: Int, carbonModifiers: UInt32) -> (keyCode: Int, modifiers: UInt32)? {
+        guard let o = UserDefaults.standard.dictionary(forKey: "KeyAtlasHotkey." + id) else { return (keyCode, carbonModifiers) }
+        guard let k = o["keyCode"] as? Int, let f = o["modifierFlags"] as? Int, k >= 0 else { return nil }
+        return (k, carbon(UInt(f)))
+    }
+
+    static func eventFlags(carbon m: UInt32) -> UInt {
+        var f: UInt = 0
+        if m & UInt32(shiftKey) != 0 { f |= 1 << 17 }
+        if m & UInt32(controlKey) != 0 { f |= 1 << 18 }
+        if m & UInt32(optionKey) != 0 { f |= 1 << 19 }
+        if m & UInt32(cmdKey) != 0 { f |= 1 << 20 }
+        return f
+    }
+
+    static func carbon(_ f: UInt) -> UInt32 {
+        var m: UInt32 = 0
+        if f & (1 << 17) != 0 { m |= UInt32(shiftKey) }
+        if f & (1 << 18) != 0 { m |= UInt32(controlKey) }
+        if f & (1 << 19) != 0 { m |= UInt32(optionKey) }
+        if f & (1 << 20) != 0 { m |= UInt32(cmdKey) }
+        return m
+    }
+
+    /// Menu key equivalent matching what's actually registered (letters and digits only).
+    static func menuKey(id: String, keyCode: Int, carbonModifiers: UInt32) -> (key: String, mask: NSEvent.ModifierFlags) {
+        guard let r = resolve(id: id, keyCode: keyCode, carbonModifiers: carbonModifiers),
+              let ch = ansi[r.keyCode] else { return ("", []) }
+        return (ch, NSEvent.ModifierFlags(rawValue: eventFlags(carbon: r.modifiers)))
+    }
+
+    private static let ansi: [Int: String] = [
+        0: "a", 11: "b", 8: "c", 2: "d", 14: "e", 3: "f", 5: "g", 4: "h", 34: "i", 38: "j", 40: "k", 37: "l", 46: "m",
+        45: "n", 31: "o", 35: "p", 12: "q", 15: "r", 1: "s", 17: "t", 32: "u", 9: "v", 13: "w", 7: "x", 16: "y", 6: "z",
+        29: "0", 18: "1", 19: "2", 20: "3", 21: "4", 23: "5", 22: "6", 26: "7", 28: "8", 25: "9",
+    ]
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -146,22 +228,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // ⌃⌥⌘R toggles recording, ⌃⌥⌘E opens the editor. Carbon hotkeys need no
         // permission, so they work even before anything has been granted.
         let mods = UInt32(controlKey | optionKey | cmdKey)
-        HotKeyCenter.shared.register(keyCode: 15, modifiers: mods) {   // R
+        HotKeyCenter.shared.register(id: "toggleRecording", title: "Start / Stop Recording", keyCode: 15, modifiers: mods) {   // R
             Task { @MainActor [weak self] in self?.toggleRecording() }
         }
-        HotKeyCenter.shared.register(keyCode: 14, modifiers: mods) {   // E
+        HotKeyCenter.shared.register(id: "openEditor", title: "Open Guide Editor", keyCode: 14, modifiers: mods) {   // E
             Task { @MainActor [weak self] in self?.openEditor() }
         }
-        HotKeyCenter.shared.register(keyCode: 5, modifiers: mods) {    // G
+        HotKeyCenter.shared.register(id: "openLibrary", title: "All Guides", keyCode: 5, modifiers: mods) {    // G
             Task { @MainActor [weak self] in self?.openLibrary() }
         }
-        HotKeyCenter.shared.register(keyCode: 45, modifiers: mods) {   // N
+        HotKeyCenter.shared.register(id: "newGuide", title: "New Guide", keyCode: 45, modifiers: mods) {   // N
             Task { @MainActor [weak self] in self?.startNewGuide() }
         }
         // ⌃⌥⌘F starts and stops a GIF step, for a Mac where holding Fn is
         // unreliable or already means something. HotKeyCenter fires on main.
-        HotKeyCenter.shared.register(keyCode: 3, modifiers: mods) { [weak self] in  // F
+        HotKeyCenter.shared.register(id: "quickGif", title: "Start / Stop GIF Step", keyCode: 3, modifiers: mods) { [weak self] in  // F
             MainActor.assumeIsolated { self?.quickGif() }
+        }
+
+        for (id, title, key, flags) in [("editor.play", "Play / Pause GIF step (editor)", 49, UInt(0)),
+                                        ("editor.applyCrop", "Apply crop (editor)", 36, 0),
+                                        ("editor.cancelCrop", "Cancel crop (editor)", 53, 0),
+                                        ("editor.deleteStep", "Delete selected step (editor)", 51, 0)] {
+            KeyAtlasBridge.publish(id: id, title: title, keyCode: key, eventFlags: flags, scope: "inApp")
         }
 
         if CommandLine.arguments.contains("--probe-fn") { probeFn() }
@@ -749,7 +838,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             : gifRecorder.isRecording ? "Stop GIF"
             : "Quick GIF (\(Self.quickCountdown) s countdown)"
         let item = NSMenuItem(title: title, action: #selector(quickGif), keyEquivalent: "f")
-        item.keyEquivalentModifierMask = [.control, .option, .command]
+        item.applyHotKey(id: "quickGif", keyCode: 3)
         item.target = self
         item.toolTip = isRecording
             ? "Counts down \(Self.quickCountdown) s, then records a GIF step without holding Fn. "
@@ -952,7 +1041,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let record = NSMenuItem(title: isRecording ? "Stop Recording" : "Start Recording",
                                 action: #selector(toggleRecording), keyEquivalent: "r")
-        record.keyEquivalentModifierMask = [.control, .option, .command]
+        record.applyHotKey(id: "toggleRecording", keyCode: 15)
         record.target = self
         menu.addItem(record)
 
@@ -963,14 +1052,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let edit = NSMenuItem(title: "Open Guide Editor…",
                               action: #selector(openEditor), keyEquivalent: "e")
-        edit.keyEquivalentModifierMask = [.control, .option, .command]
+        edit.applyHotKey(id: "openEditor", keyCode: 14)
         edit.target = self
         edit.isEnabled = true
         menu.addItem(edit)
 
         let fresh = NSMenuItem(title: "New Guide",
                                action: #selector(startNewGuide), keyEquivalent: "n")
-        fresh.keyEquivalentModifierMask = [.control, .option, .command]
+        fresh.applyHotKey(id: "newGuide", keyCode: 45)
         fresh.target = self
         fresh.isEnabled = !guide.isEmpty && !isRecording
         fresh.toolTip = guide.isEmpty
@@ -986,7 +1075,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let all = NSMenuItem(title: "All Guides…",
                              action: #selector(openLibrary), keyEquivalent: "g")
-        all.keyEquivalentModifierMask = [.control, .option, .command]
+        all.applyHotKey(id: "openLibrary", keyCode: 5)
         all.target = self
         all.toolTip = "Every guide you have recorded, with the current one marked."
         menu.addItem(all)
