@@ -16,13 +16,20 @@ import VideoToolbox
 //
 // Writes scribe.log next to the .app bundle. Unified logging redacts too much
 // and is awkward to read back; a plain file next to the project is not.
+// An installed copy sits in /Applications, which a standard user cannot write
+// to — that copy logs to ~/Library/Logs/Scribe/ instead.
 // ─────────────────────────────────────────────────────────────────────────────
 
 enum Diag {
-    private static let url: URL = {
-        URL(fileURLWithPath: Bundle.main.bundlePath)
-            .deletingLastPathComponent()
-            .appendingPathComponent("scribe.log")
+    static let url: URL = {
+        let beside = URL(fileURLWithPath: Bundle.main.bundlePath).deletingLastPathComponent()
+        if FileManager.default.isWritableFile(atPath: beside.path) {
+            return beside.appendingPathComponent("scribe.log")
+        }
+        let logs = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Logs/Scribe")
+        try? FileManager.default.createDirectory(at: logs, withIntermediateDirectories: true)
+        return logs.appendingPathComponent("scribe.log")
     }()
 
     private static let queue = DispatchQueue(label: "com.ethantruslow.scribe.diag")

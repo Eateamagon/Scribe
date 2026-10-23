@@ -1,0 +1,34 @@
+Installing Scribe
+=================
+
+1. Drag Scribe onto the Applications folder in this window.
+2. Eject the "Scribe" disk (the eject button next to it in Finder's sidebar).
+3. Open Applications and double-click Scribe.
+
+The first time, macOS says it cannot verify Scribe and offers only "Done"
+or "Move to Trash". Click Done, then:
+
+4. Open System Settings > Privacy & Security.
+5. Scroll down to the message about Scribe and click "Open Anyway".
+6. Enter your password if asked, then click "Open Anyway" once more.
+
+You only do this once. Later updates open normally.
+
+Scribe lives in the menu bar (top right of the screen), not the Dock.
+
+Permissions
+-----------
+When you first record, Scribe needs two switches turned on in
+System Settings > Privacy & Security:
+
+  - Screen & System Audio Recording  (to take the screenshots)
+  - Accessibility                    (to name what you clicked)
+
+If Scribe is not listed, click +, pick Scribe from Applications, turn it on,
+then quit Scribe from its menu and open it again. A permission never applies
+to the copy that was already running.
+
+Updating
+--------
+Download the new DMG and drag Scribe to Applications again, choosing Replace.
+Your guides and permissions carry over.

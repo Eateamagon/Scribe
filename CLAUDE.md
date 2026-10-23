@@ -82,7 +82,7 @@ Types by section:
 
 | Section | What it does |
 |---|---|
-| `Diag` | Appends to `scribe.log` beside the .app. **Read this first when debugging.** |
+| `Diag` | Appends to `scribe.log` beside the .app (or `~/Library/Logs/Scribe/` when that is read-only). **Read this first when debugging.** |
 | `Geo` | The three coordinate systems and the conversions between them |
 | `Img` | Downscale, PNG read/write, in-memory PNG encode |
 | `Redaction` / `RedactionStyle` | Normalised cover rects stored on a step |
@@ -910,8 +910,8 @@ rewrites every frame JPEG as well as the stills.
 - **US Letter only** for PDF export, and a step that will not fit in the
   remaining space breaks to a new page rather than shrinking — correct, but it
   leaves visible whitespace.
-- **Distribution is unresolved.** A self-signed certificate is enough for this
-  machine and nobody else's.
+- **Releases are not notarized.** See "Releasing" — recipients click Open
+  Anyway once. A Developer ID would remove that step.
 
 ## Testing
 
@@ -1021,6 +1021,38 @@ No automated tests; verification is the two self-tests plus a manual pass:
     shows only the page. Click a tab: the whole window. The editor checkbox
     switches either one. `--probe-browser` reports a page for each open browser.
 23. `scribe.log` has no `FAILED` lines.
+
+## Releasing
+
+```bash
+bash release.sh 1.1              # universal build -> dist/Scribe-1.1.dmg
+bash release.sh 1.1 --publish    # ...and GitHub release v1.1 (tagged at main)
+```
+
+Commit and push first; `--publish` tags `origin/main`, not the working tree.
+`release.sh` runs `build.sh` with `UNIVERSAL=1` (arm64 + x86_64 slices, lipo)
+and `VERSION`, refuses a non-universal or unsigned binary, and packs the app,
+an `/Applications` link and `dist-assets/Install Scribe.txt` into a UDZO DMG.
+Nothing else ships: Scribe links only Apple frameworks, so there are no
+dependencies for recipients to find. The x86_64 slice can be tested here under
+Rosetta: `arch -x86_64 Scribe.app/Contents/MacOS/Scribe --selftest-offline`.
+
+What recipients get, and why:
+
+- **Gatekeeper refuses the first launch** (`spctl -a` says `rejected`). The
+  app is signed with the self-signed `CursorGlow Dev` certificate, which no
+  other Mac trusts, and it is not notarized. Since macOS 15, right-click ›
+  Open no longer bypasses this; it is System Settings › Privacy & Security ›
+  **Open Anyway**, once. The only real fix is an Apple Developer Program
+  membership (Developer ID certificate + `notarytool` + hardened runtime).
+- **Permissions still survive updates on their Macs.** TCC pins the grant to
+  the designated requirement — bundle id + certificate — not to Gatekeeper
+  trust. So keep signing every release with the same certificate. Switching
+  certificates (or ad-hoc) makes every recipient re-grant Screen Recording
+  and Accessibility.
+- **An installed copy cannot write beside itself.** `/Applications` is not
+  writable for a standard user, so `Diag.url` falls back to
+  `~/Library/Logs/Scribe/scribe.log`, and Open Log follows it.
 
 ## KeyAtlas bridge
 Global hotkeys are registered by name (`HotKeyCenter.register(id:title:…)`) and published to the

@@ -1308,10 +1308,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc func openLog() {
-        let url = URL(fileURLWithPath: Bundle.main.bundlePath)
-            .deletingLastPathComponent()
-            .appendingPathComponent("scribe.log")
-        NSWorkspace.shared.open(url)
+        NSWorkspace.shared.open(Diag.url)
     }
 }
 

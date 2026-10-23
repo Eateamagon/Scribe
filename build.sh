@@ -6,7 +6,7 @@ cd "$(dirname "$0")"
 APP="Scribe.app"
 BIN="Scribe"
 BUNDLE_ID="com.ethantruslow.scribe"
-VERSION="1.0"
+VERSION="${VERSION:-1.0}"   # release.sh passes the release version in
 # Signing identity. "Scribe Dev" if you ever run make-cert.sh, otherwise the
 # "CursorGlow Dev" certificate that is already trusted on this machine — one
 # self-signed root is enough for both apps, and reusing it saves an extra
@@ -113,14 +113,24 @@ fi
 SOURCES=(main.swift Core.swift Media.swift Capture.swift Recorder.swift Export.swift Editor.swift
          SelfTest.swift SelfTestMedia.swift SelfTestRecorder.swift SelfTestStudio.swift)
 
-swiftc -O \
-  -framework Cocoa \
-  -framework Carbon \
-  -framework ScreenCaptureKit \
-  -framework VideoToolbox \
-  -framework ImageIO \
-  -o "$APP/Contents/MacOS/$BIN" \
-  "${SOURCES[@]}"
+FRAMEWORKS=(-framework Cocoa -framework Carbon -framework ScreenCaptureKit
+            -framework VideoToolbox -framework ImageIO)
+
+# UNIVERSAL=1 (release.sh sets it) compiles once per architecture and glues
+# the two with lipo, so one .app runs natively on Apple silicon and Intel.
+# Day-to-day builds stay single-arch: it halves the compile time.
+if [ -n "${UNIVERSAL:-}" ]; then
+  SLICES="$(mktemp -d)"
+  for ARCH in arm64 x86_64; do
+    echo "  $ARCH..."
+    swiftc -O -target "$ARCH-apple-macos14.0" "${FRAMEWORKS[@]}" \
+      -o "$SLICES/$BIN-$ARCH" "${SOURCES[@]}"
+  done
+  lipo -create "$SLICES/$BIN-arm64" "$SLICES/$BIN-x86_64" -output "$APP/Contents/MacOS/$BIN"
+  rm -rf "$SLICES"
+else
+  swiftc -O "${FRAMEWORKS[@]}" -o "$APP/Contents/MacOS/$BIN" "${SOURCES[@]}"
+fi
 
 # ── Signing ──────────────────────────────────────────────────────────────────
 #
